@@ -81,3 +81,21 @@ El cobro se crea en `POST /api/v1/charges` usando `payer_alias`, `amount` y
 llave idempotente) o `/reject`; el solicitante puede usar `/cancel`. Las acciones
 sobre estados terminales reciben 409. Un pago sin fondos devuelve 400, deja el
 cobro en `PENDING` y guarda la auditoría del intento, sin crear asientos.
+
+## Auditoría contable y cobertura
+
+La suite incluye diez transferencias simultáneas desde una cuenta con 50.000 COP
+y comprueba que exactamente una resulte exitosa, así como una auditoría global
+de débitos, créditos y saldos. Cada prueba usa un esquema PostgreSQL temporal y
+sesiones independientes por solicitud concurrente.
+
+Desde la raíz del repositorio, con la base de test en marcha:
+
+```bash
+docker compose --profile test run --build --rm tests pytest tests/ --cov=app --cov-report=term-missing
+```
+
+La configuración exige cobertura **superior al 90 %** cuando se ejecuta con
+`--cov`. Si se usa pytest en el host, define `TEST_DATABASE_URL` apuntando a la
+base `habicapital_p2p_test`; sin PostgreSQL se omiten las pruebas de integración
+y la puerta de cobertura falla.

@@ -19,7 +19,7 @@ from app.main import app
 from app.modules.ledger.domain.services import calculate_account_balance
 from app.modules.ledger.adapters.controllers import TransferRequest
 from app.modules.ledger.infrastructure.models import (
-    AccountModel, Base, LedgerEntryModel, TransactionModel,
+    AccountModel, Base, LedgerEntryModel, TransactionModel, UserModel,
     TransactionStatus, TransactionType, UserModel,
 )
 
@@ -150,3 +150,53 @@ async def test_parallel_transfers_cannot_overdraw_sender(ledger_db):
     async with ledger_db() as session:
         assert await calculate_account_balance(a.id, session) == 0
         assert await calculate_account_balance(b.id, session) == 50000
+
+
+@pytest.mark.asyncio
+async def test_transfer_and_balance_routes_cover_identity_and_account_errors(ledger_db):
+    sender, recipient, sender_account, _ = await seed_accounts(ledger_db)
+    accountless = UserModel(email="accountless-transfer@example.com", alias="accountless_transfer",
+                            password_hash="hash", full_name="Accountless")
+    inactive = UserModel(email="inactive-transfer@example.com", alias="inactive_transfer",
+                         password_hash="hash", full_name="Inactive", is_active=False)
+    async with ledger_db() as session, session.begin():
+        session.add_all((accountless, inactive))
+    payload = {"recipient_id": str(recipient.id), "amount": 1, "concept": "Case"}
+    token = headers(sender)["Authorization"]
+    missing_user_token = create_access_token({"sub": str(uuid.uuid4()), "email": "missing@test.example",
+                                              "alias": "missing_user", "role": "USER"})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        self_transfer = await client.post("/api/v1/transfers/execute",
+                                          json={**payload, "recipient_id": str(sender.id)},
+                                          headers=headers(sender))
+        absent_recipient = await client.post("/api/v1/transfers/execute",
+                                             json={**payload, "recipient_id": str(uuid.uuid4())},
+                                             headers=headers(sender))
+        unauthenticated_transfer = await client.post("/api/v1/transfers/execute", json=payload,
+                                                     headers={"X-Idempotency-Key": str(uuid.uuid4())})
+        no_recipient_wallet = await client.post("/api/v1/transfers/execute",
+                                                json={**payload, "recipient_id": str(accountless.id)},
+                                                headers=headers(sender))
+        inactive_token = create_access_token({"sub": str(inactive.id), "email": inactive.email,
+                                              "alias": inactive.alias, "role": "USER"})
+        accountless_token = create_access_token({"sub": str(accountless.id), "email": accountless.email,
+                                                 "alias": accountless.alias, "role": "USER"})
+        inactive_balance = await client.get("/api/v1/ledger/balance",
+                                            headers={"Authorization": f"Bearer {inactive_token}"})
+        no_wallet_balance = await client.get("/api/v1/ledger/balance",
+                                            headers={"Authorization": f"Bearer {accountless_token}"})
+        absent_user_balance = await client.get("/api/v1/ledger/balance",
+                                               headers={"Authorization": f"Bearer {missing_user_token}"})
+        no_auth_balance = await client.get("/api/v1/ledger/balance")
+        good_balance = await client.get("/api/v1/ledger/balance", headers={"Authorization": token})
+    assert self_transfer.status_code == 400
+    assert absent_recipient.status_code == 404
+    assert unauthenticated_transfer.status_code == 401
+    assert no_recipient_wallet.status_code == 404
+    assert inactive_balance.status_code == 401
+    assert no_wallet_balance.status_code == 404
+    assert absent_user_balance.status_code == 401
+    assert no_auth_balance.status_code == 401
+    assert good_balance.status_code == 200 and good_balance.json()["balance"] == 50000
+    async with ledger_db() as session:
+        assert await calculate_account_balance(sender_account.id, session) == 50000

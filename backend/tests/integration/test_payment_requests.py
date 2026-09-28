@@ -20,7 +20,7 @@ from app.main import app
 from app.modules.ledger.domain.services import calculate_account_balance
 from app.modules.ledger.infrastructure.models import (
     AccountModel, AccountType, AuditLogModel, Base, LedgerEntryModel,
-    PaymentRequestModel, PaymentRequestStatus, TransactionModel, TransactionType,
+    PaymentRequestModel, PaymentRequestStatus, TransactionModel, TransactionStatus, TransactionType,
     UserModel, UserRole,
 )
 
@@ -95,6 +95,34 @@ async def test_admin_bootstrap_creates_one_admin_and_one_omnibus(payments_db, mo
             UserModel.role == UserRole.ADMIN)) == 1
         assert await session.scalar(select(func.count()).select_from(AccountModel).where(
             AccountModel.type == AccountType.SYSTEM_OMNIBUS)) == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_bootstrap_fails_closed_on_existing_inconsistent_records(payments_db, monkeypatch):
+    await seed(payments_db)  # A different configured email cannot adopt this omnibus account.
+    monkeypatch.setattr(bootstrap_module, "get_session_factory", lambda: payments_db)
+    with pytest.raises(RuntimeError, match="cuenta ómnibus ya existe"):
+        await bootstrap_module.bootstrap_admin()
+
+
+@pytest.mark.asyncio
+async def test_admin_topup_refuses_balance_overflow(payments_db):
+    _, payer, admin, _, payer_acc, omnibus = await seed(payments_db)
+    async with payments_db() as session, session.begin():
+        funding = TransactionModel(reference_id="TOPUP-MAX-" + uuid.uuid4().hex,
+                                   type=TransactionType.TOPUP, status=TransactionStatus.SUCCESS,
+                                   concept="Near maximum")
+        session.add(funding)
+        await session.flush()
+        session.add(LedgerEntryModel(transaction_id=funding.id, debit_account_id=omnibus.id,
+                                     credit_account_id=payer_acc.id, amount=2**63 - 1))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
+                                     json={"target_user_alias": "payer", "amount": 1, "concept": "Over"})
+    assert response.status_code == 400
+    assert response.json()["code"] == "BALANCE_LIMIT_EXCEEDED"
+    async with payments_db() as session:
+        assert await calculate_account_balance(payer_acc.id, session) == 2**63 - 1
 
 
 def auth(user, *, key=False, claim_role=None):
@@ -212,3 +240,103 @@ async def test_concurrent_payment_creates_exactly_one_ledger_entry(payments_db):
     async with payments_db() as session:
         assert await calculate_account_balance(payer_acc.id, session) == 0
         assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 2
+
+
+@pytest.mark.asyncio
+async def test_charge_routes_validate_aliases_users_accounts_and_missing_ids(payments_db):
+    requester, payer, _, requester_acc, _, _ = await seed(payments_db)
+    accountless = UserModel(email="accountless@example.com", alias="accountless",
+                            password_hash="hash", full_name="Accountless")
+    inactive = UserModel(email="inactive@example.com", alias="inactive",
+                         password_hash="hash", full_name="Inactive", is_active=False)
+    async with payments_db() as session, session.begin():
+        session.add_all((accountless, inactive))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        invalid_alias = await client.post("/api/v1/charges", headers=auth(requester),
+                                          json={"payer_alias": "bad-alias", "amount": 1, "concept": "x"})
+        missing_payer = await client.post("/api/v1/charges", headers=auth(requester),
+                                          json={"payer_alias": "absent", "amount": 1, "concept": "x"})
+        self_charge = await client.post("/api/v1/charges", headers=auth(requester),
+                                        json={"payer_alias": "requester", "amount": 1, "concept": "x"})
+        missing_account = await client.post("/api/v1/charges", headers=auth(requester),
+                                            json={"payer_alias": "accountless", "amount": 1, "concept": "x"})
+        inactive_auth = await client.post("/api/v1/charges", headers=auth(inactive),
+                                          json={"payer_alias": "payer", "amount": 1, "concept": "x"})
+        absent_charge = await client.post(f"/api/v1/charges/{uuid.uuid4()}/reject",
+                                          headers=auth(payer))
+        absent_cancel = await client.post(f"/api/v1/charges/{uuid.uuid4()}/cancel",
+                                          headers=auth(requester))
+        absent_pay = await client.post(f"/api/v1/charges/{uuid.uuid4()}/pay",
+                                       headers=auth(payer, key=True))
+    assert invalid_alias.status_code == 422
+    assert missing_payer.status_code == absent_charge.status_code == absent_cancel.status_code == absent_pay.status_code == 404
+    assert self_charge.status_code == 400
+    assert missing_account.status_code == 404
+    assert inactive_auth.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_topup_rejects_invalid_target_and_missing_omnibus(payments_db):
+    _, payer, admin, _, _, omnibus = await seed(payments_db)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        invalid_alias = await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
+                                          json={"target_user_alias": "bad-alias", "amount": 1, "concept": "x"})
+        missing_target = await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
+                                           json={"target_user_alias": "absent", "amount": 1, "concept": "x"})
+        no_wallet_user = UserModel(email="walletless@example.com", alias="walletless",
+                                   password_hash="hash", full_name="Walletless")
+        async with payments_db() as session, session.begin():
+            session.add(no_wallet_user)
+        no_wallet = await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
+                                      json={"target_user_alias": "walletless", "amount": 1, "concept": "x"})
+        async with payments_db() as session, session.begin():
+            await session.delete(await session.get(AccountModel, omnibus.id))
+        no_omnibus = await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
+                                       json={"target_user_alias": "payer", "amount": 1, "concept": "x"})
+    assert invalid_alias.status_code == 422
+    assert missing_target.status_code == no_wallet.status_code == 404
+    assert no_omnibus.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_charge_rejects_payment_that_would_overflow_receiver_balance(payments_db):
+    requester, payer, admin, requester_acc, payer_acc, omnibus = await seed(payments_db)
+    async with payments_db() as session, session.begin():
+        funding = TransactionModel(reference_id="TOPUP-OVERFLOW-" + uuid.uuid4().hex,
+                                   type=TransactionType.TOPUP, status=TransactionStatus.SUCCESS,
+                                   concept="Near maximum")
+        session.add(funding)
+        await session.flush()
+        session.add(LedgerEntryModel(transaction_id=funding.id, debit_account_id=omnibus.id,
+                                     credit_account_id=requester_acc.id, amount=2**63 - 1))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
+                          json={"target_user_alias": "payer", "amount": 1, "concept": "Test"})
+        charge = await client.post("/api/v1/charges", headers=auth(requester),
+                                   json={"payer_alias": "payer", "amount": 1, "concept": "Overflow"})
+        result = await client.post(f"/api/v1/charges/{charge.json()['id']}/pay",
+                                   headers=auth(payer, key=True))
+    assert result.status_code == 400
+    assert result.json()["code"] == "BALANCE_LIMIT_EXCEEDED"
+    async with payments_db() as session:
+        assert (await session.get(PaymentRequestModel, uuid.UUID(charge.json()["id"]))).status == PaymentRequestStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_balance_endpoint_rejects_inactive_user_and_missing_wallet(payments_db):
+    requester, _, _, requester_acc, _, _ = await seed(payments_db)
+    no_account = UserModel(email="no-wallet@example.com", alias="no_wallet",
+                           password_hash="hash", full_name="No Wallet")
+    inactive = UserModel(email="inactive-balance@example.com", alias="inactive_bal",
+                         password_hash="hash", full_name="Inactive", is_active=False)
+    async with payments_db() as session, session.begin():
+        session.add_all((no_account, inactive))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        good = await client.get("/api/v1/ledger/balance", headers=auth(requester))
+        missing = await client.get("/api/v1/ledger/balance", headers=auth(no_account))
+        inactive_response = await client.get("/api/v1/ledger/balance", headers=auth(inactive))
+        unauthenticated = await client.get("/api/v1/ledger/balance")
+    assert good.status_code == 200 and good.json()["balance"] == 0
+    assert missing.status_code == 404
+    assert inactive_response.status_code == 401
+    assert unauthenticated.status_code == 401

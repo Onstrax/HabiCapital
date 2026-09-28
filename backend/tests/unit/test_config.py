@@ -19,3 +19,25 @@ def test_settings_validate_environment_and_secrets():
         Settings(_env_file=None, **{**data, "DATABASE_URL": "sqlite:///test.db"})
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{**data, "JWT_ALGORITHM": "none"})
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{**data, "ENVIRONMENT": "production-ish"})
+
+
+@pytest.mark.asyncio
+async def test_session_factory_normalizes_postgres_url(monkeypatch):
+    from app.core.config import get_settings
+    from app.core.database import get_session_factory
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost:5432/test")
+    monkeypatch.setenv("JWT_SECRET_KEY", "x" * 64)
+    monkeypatch.setenv("ADMIN_PASSWORD", "test-password-123")
+    get_settings.cache_clear()
+    get_session_factory.cache_clear()
+    factory = get_session_factory()
+    engine = factory.kw["bind"]
+    try:
+        assert engine.url.drivername == "postgresql+psycopg"
+    finally:
+        await engine.dispose()
+        get_session_factory.cache_clear()
+        get_settings.cache_clear()

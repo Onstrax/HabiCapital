@@ -43,6 +43,36 @@ def test_jwt_claims_expiration_signature_and_algorithm(settings):
                                        settings.JWT_SECRET_KEY, algorithm="HS256"), settings=settings)
 
 
+def test_password_and_token_invalid_inputs(settings):
+    with pytest.raises(ValueError):
+        hash_password("")
+    with pytest.raises(ValueError):
+        hash_password(None)
+    assert not verify_password("x", "not-a-valid-hash")
+    with pytest.raises(ValueError):
+        create_access_token({"sub": str(uuid.uuid4())}, settings=settings)
+    with pytest.raises(ValueError):
+        create_access_token({"sub": str(uuid.uuid4()), "email": "e", "alias": "a",
+                             "role": "ROOT"}, settings=settings)
+    with pytest.raises(ValueError):
+        create_access_token({"sub": "not-a-uuid", "email": "e", "alias": "a",
+                             "role": "USER"}, settings=settings)
+    malformed = jwt.encode({"sub": "bad", "email": "e", "alias": "a", "role": "USER",
+                            "exp": 9999999999, "iat": 1, "nbf": 1},
+                           settings.JWT_SECRET_KEY, algorithm="HS256")
+    with pytest.raises(jwt.InvalidTokenError):
+        decode_access_token(malformed, settings=settings)
+    wrong_role = jwt.encode({"sub": str(uuid.uuid4()), "email": "e", "alias": "a", "role": "ROOT",
+                             "exp": 9999999999, "iat": 1, "nbf": 1},
+                            settings.JWT_SECRET_KEY, algorithm="HS256")
+    with pytest.raises(jwt.InvalidTokenError):
+        decode_access_token(wrong_role, settings=settings)
+    empty_identity = create_access_token({"sub": str(uuid.uuid4()), "email": "", "alias": "",
+                                         "role": "USER"}, settings=settings)
+    with pytest.raises(jwt.InvalidTokenError):
+        decode_access_token(empty_identity, settings=settings)
+
+
 @pytest.mark.parametrize("name,masked", [
     ("Juan Esteban Gómez", "J*** E****** G****"),
     ("  Ana   María  Pérez  ", "A** M**** P****"),
