@@ -1,0 +1,14 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+body { @apply bg-cream text-ink antialiased; }
+button, input { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible {
+  @apply outline-none ring-2 ring-forest ring-offset-2;
+}
+.surface { @apply rounded-[28px] border border-[#e5eae3] bg-white shadow-card; }
+.field { @apply w-full rounded-2xl border border-[#d9e3db] bg-white px-4 py-3.5 text-ink placeholder:text-[#87948d] focus:border-forest; }
+.btn-primary { @apply inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl bg-forest px-6 py-3 font-semibold text-white transition hover:bg-[#20594e] disabled:cursor-not-allowed disabled:opacity-50; }
+.btn-subtle { @apply inline-flex min-h-12 items-center justify-center gap-2 rounded-2xl border border-[#dce6dd] bg-white px-5 py-3 font-semibold text-forest transition hover:bg-cream disabled:opacity-50; }

@@ -6,15 +6,18 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.modules.identity.adapters.controllers import (
     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
 )
 from app.modules.ledger.domain.services import calculate_account_balance
-from app.modules.ledger.infrastructure.models import AccountModel, AccountType, UserModel, UserRole
+from app.modules.ledger.infrastructure.models import (
+    AccountModel, AccountType, LedgerEntryModel, TransactionModel, UserModel, UserRole,
+)
 from app.modules.ledger.use_cases.admin_topup import execute_admin_topup
 from app.modules.ledger.use_cases.transfer_money import execute_p2p_transfer_transactional
 from app.shared.utils.security_utils import sanitize_alias
@@ -46,6 +49,20 @@ class BalanceResponse(StrictSchema):
     account_id: uuid.UUID
     balance: int
     currency: str = "COP"
+
+
+class MovementResponse(StrictSchema):
+    reference_id: str
+    type: str
+    direction: str
+    amount: int
+    concept: str
+    counterparty_alias: str
+    created_at: datetime
+
+
+class MovementsResponse(StrictSchema):
+    items: list[MovementResponse]
 
 
 class TopupRequest(StrictSchema):
@@ -123,6 +140,42 @@ async def get_balance(request: Request, session: AsyncSession = Depends(get_db))
         return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta no encontrada")
     return BalanceResponse(account_id=account.id,
                            balance=await calculate_account_balance(account.id, session))
+
+
+@router.get("/ledger/movements", response_model=MovementsResponse)
+async def get_movements(request: Request, session: AsyncSession = Depends(get_db)):
+    user_id = await current_user_id(request)
+    if isinstance(user_id, JSONResponse):
+        return user_id
+    user = await session.get(UserModel, user_id)
+    if user is None or not user.is_active:
+        return api_error(401, "UNAUTHORIZED", "Token inválido")
+    account = (await session.execute(select(AccountModel).where(
+        AccountModel.user_id == user_id,
+        AccountModel.type == AccountType.USER_WALLET))).scalar_one_or_none()
+    if account is None:
+        return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta no encontrada")
+    debit_account, credit_account = aliased(AccountModel), aliased(AccountModel)
+    debit_user, credit_user = aliased(UserModel), aliased(UserModel)
+    rows = (await session.execute(
+        select(LedgerEntryModel, TransactionModel, debit_user.alias, credit_user.alias)
+        .join(TransactionModel, TransactionModel.id == LedgerEntryModel.transaction_id)
+        .join(debit_account, debit_account.id == LedgerEntryModel.debit_account_id)
+        .join(debit_user, debit_user.id == debit_account.user_id)
+        .join(credit_account, credit_account.id == LedgerEntryModel.credit_account_id)
+        .join(credit_user, credit_user.id == credit_account.user_id)
+        .where(or_(LedgerEntryModel.debit_account_id == account.id,
+                   LedgerEntryModel.credit_account_id == account.id))
+        .order_by(LedgerEntryModel.created_at.desc(), LedgerEntryModel.id.desc())
+        .limit(50)
+    )).all()
+    return MovementsResponse(items=[MovementResponse(
+        reference_id=tx.reference_id, type=tx.type.value,
+        direction="OUT" if entry.debit_account_id == account.id else "IN",
+        amount=entry.amount, concept=tx.concept,
+        counterparty_alias=credit_alias if entry.debit_account_id == account.id else debit_alias,
+        created_at=entry.created_at,
+    ) for entry, tx, debit_alias, credit_alias in rows])
 
 
 @router.post("/admin/topup", response_model=TopupResponse)

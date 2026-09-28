@@ -3,17 +3,20 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
 from app.modules.identity.adapters.controllers import (
     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
 )
-from app.modules.ledger.infrastructure.models import AccountModel, AccountType, UserModel
+from app.modules.ledger.infrastructure.models import (
+    AccountModel, AccountType, PaymentRequestModel, PaymentRequestStatus, UserModel,
+)
 from app.modules.payment_requests.use_cases.charges import (
     InsufficientChargePayment, cancel_charge, create_charge_request,
     process_charge_payment, reject_charge,
@@ -43,6 +46,10 @@ class ChargeResponse(StrictSchema):
     created_at: datetime
 
 
+class ChargesResponse(StrictSchema):
+    items: list[ChargeResponse]
+
+
 class PaidResponse(StrictSchema):
     charge_id: uuid.UUID
     status: str
@@ -63,6 +70,34 @@ def charge_error(exc: Exception) -> JSONResponse:
     if isinstance(exc, ChargeStateConflictException):
         return api_error(409, "CHARGE_STATE_CONFLICT", "El cobro está en estado terminal")
     return api_error(400, "BALANCE_LIMIT_EXCEEDED", "El saldo receptor excedería el límite")
+
+
+@router.get("", response_model=ChargesResponse)
+async def list_charges(request: Request, status: PaymentRequestStatus = Query(PaymentRequestStatus.PENDING),
+                       session: AsyncSession = Depends(get_db)):
+    payer_id = await current_user_id(request)
+    if isinstance(payer_id, JSONResponse):
+        return payer_id
+    user = await session.get(UserModel, payer_id)
+    if user is None or not user.is_active:
+        return api_error(401, "UNAUTHORIZED", "Token inválido")
+    requester_account, payer_account = aliased(AccountModel), aliased(AccountModel)
+    requester, payer = aliased(UserModel), aliased(UserModel)
+    rows = (await session.execute(
+        select(PaymentRequestModel, requester.alias, payer.alias)
+        .join(requester_account, requester_account.id == PaymentRequestModel.requester_account_id)
+        .join(requester, requester.id == requester_account.user_id)
+        .join(payer_account, payer_account.id == PaymentRequestModel.payer_account_id)
+        .join(payer, payer.id == payer_account.user_id)
+        .where(payer_account.user_id == payer_id, PaymentRequestModel.status == status)
+        .order_by(PaymentRequestModel.created_at.desc(), PaymentRequestModel.id.desc())
+        .limit(50)
+    )).all()
+    return ChargesResponse(items=[ChargeResponse(
+        id=charge.id, requester_alias=requester_alias, payer_alias=payer_alias,
+        amount=charge.amount, concept=charge.concept, status=charge.status.value,
+        created_at=charge.created_at,
+    ) for charge, requester_alias, payer_alias in rows])
 
 
 @router.post("", response_model=ChargeResponse, status_code=201)
