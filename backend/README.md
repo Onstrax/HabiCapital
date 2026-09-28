@@ -61,3 +61,23 @@ docker compose --profile test run --rm tests
 
 Desde el host, configura `TEST_DATABASE_URL` como se indica arriba para ejecutar
 las pruebas de integración; sin esta variable se omiten las pruebas de BD.
+
+## Cobros y recargas administrativas
+
+Después de aplicar las migraciones y configurar credenciales únicas en
+`backend/.env`, crea el administrador y la cuenta ómnibus **una sola vez**:
+
+```bash
+docker compose exec api python -m app.core.bootstrap_admin
+```
+
+El comando es idempotente: no restablece la contraseña ni crea otra cuenta si ya
+existen. `POST /api/v1/admin/topup` exige JWT de un `ADMIN` activo y llave
+`X-Idempotency-Key` UUIDv4; recibe `target_user_alias`, `amount` entero en COP y
+`concept`. El saldo nuevo se calcula con el libro mayor.
+
+El cobro se crea en `POST /api/v1/charges` usando `payer_alias`, `amount` y
+`concept`. El pagador puede usar `POST /api/v1/charges/{charge_id}/pay` (requiere
+llave idempotente) o `/reject`; el solicitante puede usar `/cancel`. Las acciones
+sobre estados terminales reciben 409. Un pago sin fondos devuelve 400, deja el
+cobro en `PENDING` y guarda la auditoría del intento, sin crear asientos.

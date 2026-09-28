@@ -18,3 +18,19 @@ class BalanceLimitExceededException(Exception):
 
 class SelfTransferForbiddenException(Exception):
     pass
+
+
+class ChargeNotFoundException(Exception):
+    pass
+
+
+class ChargeStateConflictException(Exception):
+    pass
+
+
+class ChargeForbiddenException(Exception):
+    pass
+
+
+class OmnibusConfigurationException(Exception):
+    pass

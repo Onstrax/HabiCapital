@@ -1,0 +1,900 @@
+From 07dbac326d0a07ef9ed72eda787346d281dfe2dd Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 29 Sep 2026 00:32:57 +0300
+Subject: [PATCH] Implement P2P charge state machine and admin topups
+
+---
+ backend/README.md                             |  20 ++
+ .../b71f9ab4c832_charge_state_and_omnibus.py  |  59 +++++
+ backend/app/core/bootstrap_admin.py           |  51 +++++
+ backend/app/main.py                           |   2 +
+ .../modules/ledger/adapters/controllers.py    |  62 ++++-
+ .../modules/ledger/use_cases/admin_topup.py   |  58 +++++
+ .../ledger/use_cases/transfer_money.py        |   5 +-
+ .../payment_requests/adapters/controllers.py  | 172 ++++++++++++++
+ .../payment_requests/use_cases/charges.py     |  97 ++++++++
+ backend/app/shared/exceptions.py              |  16 ++
+ .../integration/test_payment_requests.py      | 214 ++++++++++++++++++
+ 11 files changed, 752 insertions(+), 4 deletions(-)
+ create mode 100644 backend/alembic/versions/b71f9ab4c832_charge_state_and_omnibus.py
+ create mode 100644 backend/app/core/bootstrap_admin.py
+ create mode 100644 backend/app/modules/ledger/use_cases/admin_topup.py
+ create mode 100644 backend/app/modules/payment_requests/adapters/controllers.py
+ create mode 100644 backend/app/modules/payment_requests/use_cases/charges.py
+ create mode 100644 backend/tests/integration/test_payment_requests.py
+
+diff --git a/backend/README.md b/backend/README.md
+index 2341e5a..6085df7 100644
+--- a/backend/README.md
++++ b/backend/README.md
+@@ -61,3 +61,23 @@ docker compose --profile test run --rm tests
+ 
+ Desde el host, configura `TEST_DATABASE_URL` como se indica arriba para ejecutar
+ las pruebas de integración; sin esta variable se omiten las pruebas de BD.
++
++## Cobros y recargas administrativas
++
++Después de aplicar las migraciones y configurar credenciales únicas en
++`backend/.env`, crea el administrador y la cuenta ómnibus **una sola vez**:
++
++```bash
++docker compose exec api python -m app.core.bootstrap_admin
++```
++
++El comando es idempotente: no restablece la contraseña ni crea otra cuenta si ya
++existen. `POST /api/v1/admin/topup` exige JWT de un `ADMIN` activo y llave
++`X-Idempotency-Key` UUIDv4; recibe `target_user_alias`, `amount` entero en COP y
++`concept`. El saldo nuevo se calcula con el libro mayor.
++
++El cobro se crea en `POST /api/v1/charges` usando `payer_alias`, `amount` y
++`concept`. El pagador puede usar `POST /api/v1/charges/{charge_id}/pay` (requiere
++llave idempotente) o `/reject`; el solicitante puede usar `/cancel`. Las acciones
++sobre estados terminales reciben 409. Un pago sin fondos devuelve 400, deja el
++cobro en `PENDING` y guarda la auditoría del intento, sin crear asientos.
+diff --git a/backend/alembic/versions/b71f9ab4c832_charge_state_and_omnibus.py b/backend/alembic/versions/b71f9ab4c832_charge_state_and_omnibus.py
+new file mode 100644
+index 0000000..a2eee74
+--- /dev/null
++++ b/backend/alembic/versions/b71f9ab4c832_charge_state_and_omnibus.py
+@@ -0,0 +1,59 @@
++"""Enforce one omnibus account and immutable terminal charge states.
++
++Revision ID: b71f9ab4c832
++Revises: ff2163b57e21
++"""
++
++from alembic import op
++
++revision = "b71f9ab4c832"
++down_revision = "ff2163b57e21"
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.execute("""
++        CREATE UNIQUE INDEX ux_single_system_omnibus
++        ON accounts (type) WHERE type = 'SYSTEM_OMNIBUS';
++    """)
++    op.execute("""
++        CREATE FUNCTION protect_charge_state() RETURNS trigger LANGUAGE plpgsql AS $$
++        BEGIN
++            IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
++                RAISE EXCEPTION 'payment request cannot be removed' USING ERRCODE = '55000';
++            END IF;
++            IF OLD.status <> 'PENDING' THEN
++                RAISE EXCEPTION 'terminal payment request is immutable' USING ERRCODE = '55000';
++            END IF;
++            IF NEW.requester_account_id <> OLD.requester_account_id
++                OR NEW.payer_account_id <> OLD.payer_account_id
++                OR NEW.amount <> OLD.amount OR NEW.concept <> OLD.concept
++                OR NEW.created_at <> OLD.created_at
++                OR NEW.status NOT IN ('PENDING', 'COMPLETED', 'REJECTED', 'CANCELLED') THEN
++                RAISE EXCEPTION 'invalid payment request mutation' USING ERRCODE = '55000';
++            END IF;
++            RETURN NEW;
++        END;
++        $$;
++    """)
++    op.execute("""
++        CREATE TRIGGER trg_protect_charge_state BEFORE UPDATE ON payment_requests
++        FOR EACH ROW EXECUTE FUNCTION protect_charge_state();
++    """)
++    op.execute("""
++        CREATE TRIGGER trg_protect_charge_delete BEFORE DELETE ON payment_requests
++        FOR EACH ROW EXECUTE FUNCTION protect_charge_state();
++    """)
++    op.execute("""
++        CREATE TRIGGER trg_protect_charge_truncate BEFORE TRUNCATE ON payment_requests
++        FOR EACH STATEMENT EXECUTE FUNCTION protect_charge_state();
++    """)
++
++
++def downgrade() -> None:
++    op.execute("DROP TRIGGER trg_protect_charge_truncate ON payment_requests")
++    op.execute("DROP TRIGGER trg_protect_charge_delete ON payment_requests")
++    op.execute("DROP TRIGGER trg_protect_charge_state ON payment_requests")
++    op.execute("DROP FUNCTION protect_charge_state()")
++    op.execute("DROP INDEX ux_single_system_omnibus")
+diff --git a/backend/app/core/bootstrap_admin.py b/backend/app/core/bootstrap_admin.py
+new file mode 100644
+index 0000000..f531afa
+--- /dev/null
++++ b/backend/app/core/bootstrap_admin.py
+@@ -0,0 +1,51 @@
++"""Run explicitly after migrations: python -m app.core.bootstrap_admin."""
++
++import asyncio
++import uuid
++
++from sqlalchemy import select, text
++
++from app.core.config import get_settings
++from app.core.database import get_session_factory
++from app.core.security import hash_password
++from app.modules.ledger.infrastructure.models import (
++    AccountModel, AccountType, UserModel, UserRole,
++)
++from app.shared.utils.security_utils import sanitize_alias
++
++
++async def bootstrap_admin() -> None:
++    settings = get_settings()
++    alias = sanitize_alias(settings.ADMIN_ALIAS)
++    async with get_session_factory()() as session, session.begin():
++        # Serialize repeated invocations so there is exactly one omnibus account.
++        await session.execute(text("SELECT pg_advisory_xact_lock(214897301)"))
++        existing_omnibus = (await session.execute(select(AccountModel).where(
++            AccountModel.type == AccountType.SYSTEM_OMNIBUS))).scalars().all()
++        admin = (await session.execute(select(UserModel).where(
++            UserModel.email == settings.ADMIN_EMAIL))).scalar_one_or_none()
++        if admin is None:
++            if existing_omnibus:
++                raise RuntimeError("La cuenta ómnibus ya existe; requiere conciliación manual")
++            admin = UserModel(email=settings.ADMIN_EMAIL, alias=alias,
++                              password_hash=hash_password(settings.ADMIN_PASSWORD),
++                              full_name="Administrador HabiCapital", role=UserRole.ADMIN)
++            session.add(admin)
++            await session.flush()
++        elif admin.role != UserRole.ADMIN or not admin.is_active or admin.alias != alias:
++            raise RuntimeError("El usuario administrador configurado presenta un conflicto")
++        if existing_omnibus:
++            if len(existing_omnibus) != 1 or existing_omnibus[0].user_id != admin.id:
++                raise RuntimeError("La cuenta ómnibus requiere conciliación manual")
++        else:
++            existing_account = (await session.execute(select(AccountModel).where(
++                AccountModel.user_id == admin.id))).scalar_one_or_none()
++            if existing_account is not None:
++                raise RuntimeError("El administrador ya tiene otra cuenta; requiere conciliación manual")
++            session.add(AccountModel(user_id=admin.id,
++                                     account_number="SYS" + uuid.uuid4().hex[:17],
++                                     type=AccountType.SYSTEM_OMNIBUS))
++
++
++if __name__ == "__main__":
++    asyncio.run(bootstrap_admin())
+diff --git a/backend/app/main.py b/backend/app/main.py
+index 1d22a52..e812bfc 100644
+--- a/backend/app/main.py
++++ b/backend/app/main.py
+@@ -9,6 +9,7 @@ from datetime import datetime, timezone
+ from app.core.idempotency import IdempotencyMiddleware
+ from app.modules.identity.adapters.controllers import limiter, router
+ from app.modules.ledger.adapters.controllers import router as ledger_router
++from app.modules.payment_requests.adapters.controllers import router as charges_router
+ 
+ app = FastAPI(title="HabiCapital P2P API")
+ app.state.limiter = limiter
+@@ -37,3 +38,4 @@ async def rate_limit_error(request, exc):
+ app.add_middleware(IdempotencyMiddleware)
+ app.include_router(router)
+ app.include_router(ledger_router)
++app.include_router(charges_router)
+diff --git a/backend/app/modules/ledger/adapters/controllers.py b/backend/app/modules/ledger/adapters/controllers.py
+index 60164bb..01644f7 100644
+--- a/backend/app/modules/ledger/adapters/controllers.py
++++ b/backend/app/modules/ledger/adapters/controllers.py
+@@ -14,11 +14,13 @@ from app.modules.identity.adapters.controllers import (
+     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
+ )
+ from app.modules.ledger.domain.services import calculate_account_balance
+-from app.modules.ledger.infrastructure.models import AccountModel, UserModel
++from app.modules.ledger.infrastructure.models import AccountModel, AccountType, UserModel, UserRole
++from app.modules.ledger.use_cases.admin_topup import execute_admin_topup
+ from app.modules.ledger.use_cases.transfer_money import execute_p2p_transfer_transactional
++from app.shared.utils.security_utils import sanitize_alias
+ from app.shared.exceptions import (
+     AccountNotFoundException, BalanceLimitExceededException, InsufficientFundsException,
+-    SelfTransferForbiddenException,
++    OmnibusConfigurationException, SelfTransferForbiddenException,
+ )
+ 
+ router = APIRouter(prefix="/api/v1")
+@@ -46,6 +48,20 @@ class BalanceResponse(StrictSchema):
+     currency: str = "COP"
+ 
+ 
++class TopupRequest(StrictSchema):
++    target_user_alias: str
++    amount: int = Field(gt=0, le=2**63 - 1)
++    concept: str = Field(min_length=1, max_length=255)
++
++
++class TopupResponse(StrictSchema):
++    reference_id: str
++    target_alias: str
++    amount_credited: int
++    new_target_balance: int
++    timestamp: datetime
++
++
+ @router.post("/transfers/execute", response_model=TransferResponse, status_code=201)
+ @limiter.limit("10/minute", key_func=lookup_rate_key)
+ async def execute_transfer(request: Request, payload: TransferRequest,
+@@ -107,3 +123,45 @@ async def get_balance(request: Request, session: AsyncSession = Depends(get_db))
+         return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta no encontrada")
+     return BalanceResponse(account_id=account.id,
+                            balance=await calculate_account_balance(account.id, session))
++
++
++@router.post("/admin/topup", response_model=TopupResponse)
++async def admin_topup(request: Request, payload: TopupRequest,
++                      session: AsyncSession = Depends(get_db)):
++    admin_id = await current_user_id(request)
++    if isinstance(admin_id, JSONResponse):
++        return admin_id
++    try:
++        alias = sanitize_alias(payload.target_user_alias)
++    except ValueError:
++        return api_error(422, "VALIDATION_ERROR", "Alias inválido")
++    try:
++        async with session.begin():
++            admin = await session.get(UserModel, admin_id)
++            if admin is None or not admin.is_active or admin.role != UserRole.ADMIN:
++                return api_error(403, "FORBIDDEN", "Solo el administrador puede recargar")
++            target = (await session.execute(select(UserModel).where(
++                UserModel.alias == alias, UserModel.is_active.is_(True)))).scalar_one_or_none()
++            if target is None:
++                return api_error(404, "USER_NOT_FOUND", "Usuario objetivo no encontrado")
++            account = (await session.execute(select(AccountModel).where(
++                AccountModel.user_id == target.id,
++                AccountModel.type == AccountType.USER_WALLET))).scalar_one_or_none()
++            if account is None:
++                return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta objetivo no encontrada")
++            tx, balance = await execute_admin_topup(
++                session, admin_id, account.id, payload.amount, payload.concept,
++                "TOPUP-" + uuid.uuid4().hex,
++            )
++            response = TopupResponse(reference_id=tx.reference_id, target_alias=target.alias,
++                                     amount_credited=payload.amount, new_target_balance=balance,
++                                     timestamp=tx.created_at)
++    except PermissionError:
++        return api_error(403, "FORBIDDEN", "Solo el administrador puede recargar")
++    except BalanceLimitExceededException:
++        return api_error(400, "BALANCE_LIMIT_EXCEEDED", "El saldo objetivo excedería el límite")
++    except (AccountNotFoundException, SelfTransferForbiddenException):
++        return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta objetivo no encontrada")
++    except OmnibusConfigurationException:
++        return api_error(503, "OMNIBUS_NOT_CONFIGURED", "Cuenta ómnibus no configurada")
++    return response
+diff --git a/backend/app/modules/ledger/use_cases/admin_topup.py b/backend/app/modules/ledger/use_cases/admin_topup.py
+new file mode 100644
+index 0000000..127321f
+--- /dev/null
++++ b/backend/app/modules/ledger/use_cases/admin_topup.py
+@@ -0,0 +1,58 @@
++"""Issue COP from the system omnibus account within the caller's transaction."""
++
++import uuid
++
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.modules.ledger.domain.services import calculate_account_balance
++from app.modules.ledger.infrastructure.models import (
++    AccountModel, AccountType, AuditLogModel, LedgerEntryModel,
++    TransactionModel, TransactionStatus, TransactionType, UserModel, UserRole,
++)
++from app.modules.ledger.use_cases.transfer_money import MAX_COP
++from app.shared.exceptions import (
++    AccountNotFoundException, BalanceLimitExceededException, OmnibusConfigurationException,
++    SelfTransferForbiddenException,
++)
++
++
++async def execute_admin_topup(session: AsyncSession, admin_id: uuid.UUID,
++                              target_account_id: uuid.UUID, amount: int,
++                              concept: str, reference_id: str) -> tuple[TransactionModel, int]:
++    """Create a single balanced ledger entry; only a persisted ADMIN may issue funds."""
++    if isinstance(amount, bool) or not isinstance(amount, int) or not 0 < amount <= MAX_COP:
++        raise ValueError("El monto debe ser un entero positivo dentro de BIGINT")
++    if not concept.strip() or len(concept) > 255:
++        raise ValueError("Concepto inválido")
++    admin = await session.get(UserModel, admin_id)
++    if admin is None or not admin.is_active or admin.role != UserRole.ADMIN:
++        raise PermissionError("Solamente un administrador activo puede recargar saldo")
++    omnibus_ids = (await session.execute(select(AccountModel.id).where(
++        AccountModel.type == AccountType.SYSTEM_OMNIBUS))).scalars().all()
++    if len(omnibus_ids) != 1:
++        raise OmnibusConfigurationException("Se requiere una cuenta SYSTEM_OMNIBUS única")
++    omnibus_id = omnibus_ids[0]
++    if omnibus_id == target_account_id:
++        raise SelfTransferForbiddenException("No se puede acreditar la cuenta ómnibus")
++    ids = sorted([omnibus_id, target_account_id])
++    accounts = (await session.execute(select(AccountModel).where(AccountModel.id.in_(ids))
++                                      .order_by(AccountModel.id.asc()).with_for_update())).scalars().all()
++    if len(accounts) != 2 or next(a for a in accounts if a.id == target_account_id).type != AccountType.USER_WALLET:
++        raise AccountNotFoundException("Cuenta de usuario no encontrada")
++    balance = await calculate_account_balance(target_account_id, session)
++    if balance + amount > MAX_COP:
++        raise BalanceLimitExceededException("El saldo objetivo excedería BIGINT")
++    tx = TransactionModel(reference_id=reference_id, type=TransactionType.TOPUP,
++                          status=TransactionStatus.SUCCESS, concept=concept)
++    session.add(tx)
++    await session.flush()
++    session.add_all((
++        LedgerEntryModel(transaction_id=tx.id, debit_account_id=omnibus_id,
++                         credit_account_id=target_account_id, amount=amount),
++        AuditLogModel(user_id=admin_id, action="ADMIN_TOPUP",
++                      payload={"reference_id": reference_id, "amount": amount,
++                               "target_account_id": str(target_account_id)}),
++    ))
++    await session.flush()
++    return tx, balance + amount
+diff --git a/backend/app/modules/ledger/use_cases/transfer_money.py b/backend/app/modules/ledger/use_cases/transfer_money.py
+index d2cf8c6..f418ced 100644
+--- a/backend/app/modules/ledger/use_cases/transfer_money.py
++++ b/backend/app/modules/ledger/use_cases/transfer_money.py
+@@ -25,6 +25,7 @@ async def execute_p2p_transfer_transactional(
+     amount: int,
+     concept: str,
+     reference_id: str,
++    transaction_type: TransactionType = TransactionType.P2P_TRANSFER,
+ ) -> TransactionModel:
+     """Insert one debit/credit entry within the caller's open ACID transaction."""
+     if isinstance(amount, bool) or not isinstance(amount, int) or not 0 < amount <= MAX_COP:
+@@ -52,14 +53,14 @@ async def execute_p2p_transfer_transactional(
+     if recipient_balance + amount > MAX_COP:
+         raise BalanceLimitExceededException("El saldo receptor excedería BIGINT")
+ 
+-    tx = TransactionModel(reference_id=reference_id, type=TransactionType.P2P_TRANSFER,
++    tx = TransactionModel(reference_id=reference_id, type=transaction_type,
+                           status=TransactionStatus.SUCCESS, concept=concept)
+     session.add(tx)
+     await session.flush()
+     session.add(LedgerEntryModel(transaction_id=tx.id, debit_account_id=sender_account_id,
+                                  credit_account_id=recipient_account_id, amount=amount))
+     session.add(AuditLogModel(user_id=accounts[sender_account_id].user_id,
+-                              action="P2P_TRANSFER",
++                              action=transaction_type.value,
+                               payload={"reference_id": reference_id, "amount": amount,
+                                        "recipient_account_id": str(recipient_account_id)}))
+     await session.flush()
+diff --git a/backend/app/modules/payment_requests/adapters/controllers.py b/backend/app/modules/payment_requests/adapters/controllers.py
+new file mode 100644
+index 0000000..fbf5caa
+--- /dev/null
++++ b/backend/app/modules/payment_requests/adapters/controllers.py
+@@ -0,0 +1,172 @@
++"""Charge HTTP contracts and role checked state transitions."""
++
++import uuid
++from datetime import datetime, timezone
++
++from fastapi import APIRouter, Depends, Request
++from fastapi.responses import JSONResponse
++from pydantic import Field
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.core.database import get_db
++from app.modules.identity.adapters.controllers import (
++    StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
++)
++from app.modules.ledger.infrastructure.models import AccountModel, AccountType, UserModel
++from app.modules.payment_requests.use_cases.charges import (
++    InsufficientChargePayment, cancel_charge, create_charge_request,
++    process_charge_payment, reject_charge,
++)
++from app.shared.exceptions import (
++    BalanceLimitExceededException, ChargeForbiddenException,
++    ChargeNotFoundException, ChargeStateConflictException,
++)
++from app.shared.utils.security_utils import sanitize_alias
++
++router = APIRouter(prefix="/api/v1/charges")
++
++
++class ChargeRequest(StrictSchema):
++    payer_alias: str
++    amount: int = Field(gt=0, le=2**63 - 1)
++    concept: str = Field(min_length=1, max_length=255)
++
++
++class ChargeResponse(StrictSchema):
++    id: uuid.UUID
++    requester_alias: str
++    payer_alias: str
++    amount: int
++    concept: str
++    status: str
++    created_at: datetime
++
++
++class PaidResponse(StrictSchema):
++    charge_id: uuid.UUID
++    status: str
++    transaction_reference: str
++    paid_at: datetime
++
++
++class TransitionResponse(StrictSchema):
++    charge_id: uuid.UUID
++    status: str
++
++
++def charge_error(exc: Exception) -> JSONResponse:
++    if isinstance(exc, ChargeNotFoundException):
++        return api_error(404, "CHARGE_NOT_FOUND", "Cobro no encontrado")
++    if isinstance(exc, ChargeForbiddenException):
++        return api_error(403, "FORBIDDEN", "No autorizado para este cobro")
++    if isinstance(exc, ChargeStateConflictException):
++        return api_error(409, "CHARGE_STATE_CONFLICT", "El cobro está en estado terminal")
++    return api_error(400, "BALANCE_LIMIT_EXCEEDED", "El saldo receptor excedería el límite")
++
++
++@router.post("", response_model=ChargeResponse, status_code=201)
++@limiter.limit("15/minute", key_func=lookup_rate_key)
++async def create_charge(request: Request, payload: ChargeRequest,
++                        session: AsyncSession = Depends(get_db)):
++    requester_id = await current_user_id(request)
++    if isinstance(requester_id, JSONResponse):
++        return requester_id
++    try:
++        alias = sanitize_alias(payload.payer_alias)
++    except ValueError:
++        return api_error(422, "VALIDATION_ERROR", "Alias inválido")
++    async with session.begin():
++        requester = await session.get(UserModel, requester_id)
++        if requester is None or not requester.is_active:
++            return api_error(401, "UNAUTHORIZED", "Token inválido")
++        payer = (await session.execute(select(UserModel).where(
++            UserModel.alias == alias, UserModel.is_active.is_(True)))).scalar_one_or_none()
++        if payer is None:
++            return api_error(404, "PAYER_NOT_FOUND", "Pagador no encontrado")
++        if payer.id == requester.id:
++            return api_error(400, "SELF_CHARGE_FORBIDDEN", "No se permiten autocobros")
++        accounts = (await session.execute(select(AccountModel).where(
++            AccountModel.user_id.in_([requester_id, payer.id]),
++            AccountModel.type == AccountType.USER_WALLET))).scalars().all()
++        by_user = {account.user_id: account for account in accounts}
++        if requester_id not in by_user or payer.id not in by_user:
++            return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta no encontrada")
++        charge = await create_charge_request(session, by_user[requester_id].id,
++                                             by_user[payer.id].id, payload.amount,
++                                             payload.concept)
++        return ChargeResponse(id=charge.id, requester_alias=requester.alias,
++                              payer_alias=payer.alias, amount=charge.amount,
++                              concept=charge.concept, status=charge.status.value,
++                              created_at=charge.created_at)
++
++
++@router.post("/{charge_id}/pay", response_model=PaidResponse)
++@limiter.limit("15/minute", key_func=lookup_rate_key)
++async def pay_charge(request: Request, charge_id: uuid.UUID,
++                     session: AsyncSession = Depends(get_db)):
++    payer_id = await current_user_id(request)
++    if isinstance(payer_id, JSONResponse):
++        return payer_id
++    try:
++        async with session.begin():
++            actor = await session.get(UserModel, payer_id)
++            if actor is None or not actor.is_active:
++                return api_error(401, "UNAUTHORIZED", "Token inválido")
++            outcome = await process_charge_payment(session, charge_id, payer_id,
++                                                   "TRF-" + uuid.uuid4().hex)
++            if isinstance(outcome, InsufficientChargePayment):
++                response = JSONResponse(status_code=400, content={
++                    "code": "INSUFFICIENT_FUNDS_FOR_PAYMENT_REQUEST",
++                    "message": "Saldo insuficiente para completar este pago. El cobro se mantendrá en estado PENDING.",
++                    "details": {"current_balance": outcome.current_balance,
++                                "required_amount": outcome.required_amount,
++                                "charge_status": "PENDING"},
++                    "timestamp": datetime.now(timezone.utc).isoformat(),
++                })
++            else:
++                response = PaidResponse(charge_id=charge_id, status="COMPLETED",
++                                        transaction_reference=outcome.reference_id,
++                                        paid_at=outcome.created_at)
++    except (ChargeNotFoundException, ChargeForbiddenException,
++            ChargeStateConflictException, BalanceLimitExceededException) as exc:
++        return charge_error(exc)
++    return response
++
++
++@router.post("/{charge_id}/reject", response_model=TransitionResponse)
++@limiter.limit("15/minute", key_func=lookup_rate_key)
++async def reject(request: Request, charge_id: uuid.UUID,
++                 session: AsyncSession = Depends(get_db)):
++    payer_id = await current_user_id(request)
++    if isinstance(payer_id, JSONResponse):
++        return payer_id
++    try:
++        async with session.begin():
++            actor = await session.get(UserModel, payer_id)
++            if actor is None or not actor.is_active:
++                return api_error(401, "UNAUTHORIZED", "Token inválido")
++            charge = await reject_charge(session, charge_id, payer_id)
++            response = TransitionResponse(charge_id=charge.id, status=charge.status.value)
++    except (ChargeNotFoundException, ChargeForbiddenException, ChargeStateConflictException) as exc:
++        return charge_error(exc)
++    return response
++
++
++@router.post("/{charge_id}/cancel", response_model=TransitionResponse)
++@limiter.limit("15/minute", key_func=lookup_rate_key)
++async def cancel(request: Request, charge_id: uuid.UUID,
++                 session: AsyncSession = Depends(get_db)):
++    requester_id = await current_user_id(request)
++    if isinstance(requester_id, JSONResponse):
++        return requester_id
++    try:
++        async with session.begin():
++            actor = await session.get(UserModel, requester_id)
++            if actor is None or not actor.is_active:
++                return api_error(401, "UNAUTHORIZED", "Token inválido")
++            charge = await cancel_charge(session, charge_id, requester_id)
++            response = TransitionResponse(charge_id=charge.id, status=charge.status.value)
++    except (ChargeNotFoundException, ChargeForbiddenException, ChargeStateConflictException) as exc:
++        return charge_error(exc)
++    return response
+diff --git a/backend/app/modules/payment_requests/use_cases/charges.py b/backend/app/modules/payment_requests/use_cases/charges.py
+new file mode 100644
+index 0000000..f76a3c8
+--- /dev/null
++++ b/backend/app/modules/payment_requests/use_cases/charges.py
+@@ -0,0 +1,97 @@
++"""Deterministic charge transitions; the caller commits the ACID transaction."""
++
++import uuid
++from dataclasses import dataclass
++
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.modules.ledger.infrastructure.models import (
++    AccountModel, AuditLogModel, PaymentRequestModel, PaymentRequestStatus,
++    TransactionType,
++)
++from app.modules.ledger.use_cases.transfer_money import (
++    MAX_COP, execute_p2p_transfer_transactional,
++)
++from app.shared.exceptions import (
++    ChargeForbiddenException, ChargeNotFoundException, ChargeStateConflictException,
++    InsufficientFundsException,
++)
++
++
++@dataclass(frozen=True)
++class InsufficientChargePayment:
++    current_balance: int
++    required_amount: int
++
++
++async def create_charge_request(session: AsyncSession, requester_account_id: uuid.UUID,
++                                payer_account_id: uuid.UUID, amount: int,
++                                concept: str) -> PaymentRequestModel:
++    if isinstance(amount, bool) or not isinstance(amount, int) or not 0 < amount <= MAX_COP:
++        raise ValueError("Monto inválido")
++    if requester_account_id == payer_account_id:
++        raise ValueError("No se permiten autocobros")
++    if not concept.strip() or len(concept) > 255:
++        raise ValueError("Concepto inválido")
++    charge = PaymentRequestModel(requester_account_id=requester_account_id,
++                                 payer_account_id=payer_account_id, amount=amount,
++                                 concept=concept, status=PaymentRequestStatus.PENDING)
++    session.add(charge)
++    await session.flush()
++    return charge
++
++
++async def _locked_pending_charge(session: AsyncSession, charge_id: uuid.UUID,
++                                 actor_id: uuid.UUID, actor_side: str) -> PaymentRequestModel:
++    charge = (await session.execute(select(PaymentRequestModel).where(
++        PaymentRequestModel.id == charge_id).with_for_update())).scalar_one_or_none()
++    if charge is None:
++        raise ChargeNotFoundException("Cobro no encontrado")
++    account_id = charge.payer_account_id if actor_side == "payer" else charge.requester_account_id
++    account = await session.get(AccountModel, account_id)
++    if account is None or account.user_id != actor_id:
++        raise ChargeForbiddenException("Acción no permitida para este cobro")
++    if charge.status != PaymentRequestStatus.PENDING:
++        raise ChargeStateConflictException("El cobro está en estado terminal")
++    return charge
++
++
++async def process_charge_payment(session: AsyncSession, charge_id: uuid.UUID,
++                                 payer_id: uuid.UUID, reference_id: str):
++    charge = await _locked_pending_charge(session, charge_id, payer_id, "payer")
++    try:
++        tx = await execute_p2p_transfer_transactional(
++            session=session, sender_account_id=charge.payer_account_id,
++            recipient_account_id=charge.requester_account_id,
++            amount=charge.amount, concept=charge.concept, reference_id=reference_id,
++            transaction_type=TransactionType.PAYMENT_REQUEST_PAYMENT,
++        )
++    except InsufficientFundsException as error:
++        # The transfer has not inserted any financial rows at this point.
++        session.add(AuditLogModel(user_id=payer_id,
++                                  action="PAYMENT_REQUEST_INSUFFICIENT_FUNDS",
++                                  payload={"charge_id": str(charge.id),
++                                           "current_balance": error.current_balance,
++                                           "required_amount": error.required_amount}))
++        await session.flush()
++        return InsufficientChargePayment(error.current_balance, error.required_amount)
++    charge.status = PaymentRequestStatus.COMPLETED
++    await session.flush()
++    return tx
++
++
++async def reject_charge(session: AsyncSession, charge_id: uuid.UUID,
++                        payer_id: uuid.UUID) -> PaymentRequestModel:
++    charge = await _locked_pending_charge(session, charge_id, payer_id, "payer")
++    charge.status = PaymentRequestStatus.REJECTED
++    await session.flush()
++    return charge
++
++
++async def cancel_charge(session: AsyncSession, charge_id: uuid.UUID,
++                        requester_id: uuid.UUID) -> PaymentRequestModel:
++    charge = await _locked_pending_charge(session, charge_id, requester_id, "requester")
++    charge.status = PaymentRequestStatus.CANCELLED
++    await session.flush()
++    return charge
+diff --git a/backend/app/shared/exceptions.py b/backend/app/shared/exceptions.py
+index ccf3aad..2280763 100644
+--- a/backend/app/shared/exceptions.py
++++ b/backend/app/shared/exceptions.py
+@@ -18,3 +18,19 @@ class BalanceLimitExceededException(Exception):
+ 
+ class SelfTransferForbiddenException(Exception):
+     pass
++
++
++class ChargeNotFoundException(Exception):
++    pass
++
++
++class ChargeStateConflictException(Exception):
++    pass
++
++
++class ChargeForbiddenException(Exception):
++    pass
++
++
++class OmnibusConfigurationException(Exception):
++    pass
+diff --git a/backend/tests/integration/test_payment_requests.py b/backend/tests/integration/test_payment_requests.py
+new file mode 100644
+index 0000000..a04c599
+--- /dev/null
++++ b/backend/tests/integration/test_payment_requests.py
+@@ -0,0 +1,214 @@
++"""End-to-end charge transitions and administrator funding on PostgreSQL."""
++
++import asyncio
++import os
++import uuid
++
++import httpx
++import pytest
++import pytest_asyncio
++from sqlalchemy import func, select, text
++from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
++from sqlalchemy.pool import NullPool
++
++from app.core import idempotency
++from app.core.config import get_settings
++from app.core.database import get_db
++from app.core.security import create_access_token
++from app.core import bootstrap_admin as bootstrap_module
++from app.main import app
++from app.modules.ledger.domain.services import calculate_account_balance
++from app.modules.ledger.infrastructure.models import (
++    AccountModel, AccountType, AuditLogModel, Base, LedgerEntryModel,
++    PaymentRequestModel, PaymentRequestStatus, TransactionModel, TransactionType,
++    UserModel, UserRole,
++)
++
++
++def test_charge_and_topup_routes_are_registered():
++    paths = set(app.openapi()["paths"])
++    assert {"/api/v1/charges", "/api/v1/charges/{charge_id}/pay",
++            "/api/v1/charges/{charge_id}/reject", "/api/v1/charges/{charge_id}/cancel",
++            "/api/v1/admin/topup"} <= paths
++
++
++@pytest_asyncio.fixture
++async def payments_db(monkeypatch):
++    url = os.getenv("TEST_DATABASE_URL")
++    if not url:
++        pytest.skip("TEST_DATABASE_URL must point to a disposable PostgreSQL database")
++    schema = "test_charges_" + uuid.uuid4().hex[:12]
++    root_engine = create_async_engine(url, poolclass=NullPool)
++    async with root_engine.begin() as conn:
++        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
++    engine = root_engine.execution_options(schema_translate_map={None: schema})
++    try:
++        async with engine.begin() as conn:
++            await conn.run_sync(Base.metadata.create_all)
++        sessions = async_sessionmaker(engine, expire_on_commit=False)
++
++        async def override_db():
++            async with sessions() as session:
++                yield session
++
++        app.dependency_overrides[get_db] = override_db
++        monkeypatch.setattr(idempotency, "get_session_factory", lambda: sessions)
++        monkeypatch.setenv("DATABASE_URL", url)
++        monkeypatch.setenv("JWT_SECRET_KEY", "t" * 64)
++        monkeypatch.setenv("ADMIN_PASSWORD", "test-password-123")
++        get_settings.cache_clear()
++        yield sessions
++    finally:
++        app.dependency_overrides.clear()
++        get_settings.cache_clear()
++        async with root_engine.begin() as conn:
++            await conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
++        await root_engine.dispose()
++
++
++async def seed(sessions):
++    async with sessions() as session, session.begin():
++        requester = UserModel(email="requester@example.com", alias="requester",
++                              password_hash="hash", full_name="Requester")
++        payer = UserModel(email="payer@example.com", alias="payer",
++                          password_hash="hash", full_name="Payer")
++        admin = UserModel(email="admin@example.com", alias="adminuser",
++                          password_hash="hash", full_name="Admin", role=UserRole.ADMIN)
++        session.add_all((requester, payer, admin))
++        await session.flush()
++        requester_acc = AccountModel(user_id=requester.id, account_number="A" + uuid.uuid4().hex[:19])
++        payer_acc = AccountModel(user_id=payer.id, account_number="B" + uuid.uuid4().hex[:19])
++        omnibus = AccountModel(user_id=admin.id, account_number="O" + uuid.uuid4().hex[:19],
++                               type=AccountType.SYSTEM_OMNIBUS)
++        session.add_all((requester_acc, payer_acc, omnibus))
++        await session.flush()
++    return requester, payer, admin, requester_acc, payer_acc, omnibus
++
++
++@pytest.mark.asyncio
++async def test_admin_bootstrap_creates_one_admin_and_one_omnibus(payments_db, monkeypatch):
++    monkeypatch.setattr(bootstrap_module, "get_session_factory", lambda: payments_db)
++    await bootstrap_module.bootstrap_admin()
++    await bootstrap_module.bootstrap_admin()
++    async with payments_db() as session:
++        assert await session.scalar(select(func.count()).select_from(UserModel).where(
++            UserModel.role == UserRole.ADMIN)) == 1
++        assert await session.scalar(select(func.count()).select_from(AccountModel).where(
++            AccountModel.type == AccountType.SYSTEM_OMNIBUS)) == 1
++
++
++def auth(user, *, key=False, claim_role=None):
++    role = claim_role or user.role.value
++    token = create_access_token({"sub": str(user.id), "email": user.email,
++                                 "alias": user.alias, "role": role})
++    result = {"Authorization": "Bearer " + token}
++    if key:
++        result["X-Idempotency-Key"] = str(uuid.uuid4())
++    return result
++
++
++@pytest.mark.asyncio
++async def test_admin_topup_and_successful_charge_payment(payments_db):
++    requester, payer, admin, requester_acc, payer_acc, omnibus = await seed(payments_db)
++    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
++        forbidden = await client.post("/api/v1/admin/topup", headers=auth(payer, key=True),
++                                      json={"target_user_alias": "payer", "amount": 30000,
++                                            "concept": "Recarga"})
++        forged = await client.post("/api/v1/admin/topup", headers=auth(payer, key=True, claim_role="ADMIN"),
++                                   json={"target_user_alias": "payer", "amount": 30000,
++                                         "concept": "Recarga"})
++        topup_headers = auth(admin, key=True)
++        topup = await client.post("/api/v1/admin/topup", headers=topup_headers,
++                                  json={"target_user_alias": "payer", "amount": 30000,
++                                        "concept": "Recarga"})
++        replay_topup = await client.post("/api/v1/admin/topup", headers=topup_headers,
++                                         json={"target_user_alias": "payer", "amount": 30000,
++                                               "concept": "Recarga"})
++        charge = await client.post("/api/v1/charges", headers=auth(requester),
++                                   json={"payer_alias": "payer", "amount": 25000,
++                                         "concept": "Cine"})
++        charge_id = charge.json().get("id")
++        pay_headers = auth(payer, key=True)
++        paid = await client.post(f"/api/v1/charges/{charge_id}/pay", headers=pay_headers)
++        replay_paid = await client.post(f"/api/v1/charges/{charge_id}/pay", headers=pay_headers)
++        terminal = await client.post(f"/api/v1/charges/{charge_id}/reject", headers=auth(payer))
++    assert forbidden.status_code == forged.status_code == 403
++    assert topup.status_code == replay_topup.status_code == 200
++    assert replay_topup.headers["X-Cache"] == "HIT-IDEMPOTENCY"
++    assert topup.json()["new_target_balance"] == 30000
++    assert charge.status_code == 201 and charge.json()["status"] == "PENDING"
++    assert paid.status_code == replay_paid.status_code == 200
++    assert replay_paid.headers["X-Cache"] == "HIT-IDEMPOTENCY"
++    assert paid.json()["status"] == "COMPLETED" and paid.json() == replay_paid.json()
++    assert terminal.status_code == 409
++    async with payments_db() as session:
++        assert await calculate_account_balance(payer_acc.id, session) == 5000
++        assert await calculate_account_balance(requester_acc.id, session) == 25000
++        assert await calculate_account_balance(omnibus.id, session) == -30000
++        assert (await session.get(PaymentRequestModel, uuid.UUID(charge_id))).status == PaymentRequestStatus.COMPLETED
++        assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 2
++        assert await session.scalar(select(func.count()).select_from(TransactionModel).where(
++            TransactionModel.type == TransactionType.PAYMENT_REQUEST_PAYMENT)) == 1
++
++
++@pytest.mark.asyncio
++async def test_insufficient_funds_keeps_charge_pending_and_audits_failure(payments_db):
++    requester, payer, _, requester_acc, payer_acc, _ = await seed(payments_db)
++    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
++        charge = await client.post("/api/v1/charges", headers=auth(requester),
++                                   json={"payer_alias": "payer", "amount": 25000,
++                                         "concept": "Cine"})
++        charge_id = charge.json().get("id")
++        denied = await client.post(f"/api/v1/charges/{charge_id}/pay", headers=auth(requester, key=True))
++        response = await client.post(f"/api/v1/charges/{charge_id}/pay", headers=auth(payer, key=True))
++    assert charge.status_code == 201 and denied.status_code == 403
++    assert response.status_code == 400
++    assert response.json()["code"] == "INSUFFICIENT_FUNDS_FOR_PAYMENT_REQUEST"
++    assert response.json()["details"] == {"current_balance": 0, "required_amount": 25000,
++                                           "charge_status": "PENDING"}
++    async with payments_db() as session:
++        assert (await session.get(PaymentRequestModel, uuid.UUID(charge_id))).status == PaymentRequestStatus.PENDING
++        assert await calculate_account_balance(payer_acc.id, session) == 0
++        assert await calculate_account_balance(requester_acc.id, session) == 0
++        assert await session.scalar(select(func.count()).select_from(TransactionModel)) == 0
++        assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 0
++        assert await session.scalar(select(func.count()).select_from(AuditLogModel).where(
++            AuditLogModel.action == "PAYMENT_REQUEST_INSUFFICIENT_FUNDS")) == 1
++
++
++@pytest.mark.asyncio
++async def test_reject_cancel_authorization_and_terminal_states(payments_db):
++    requester, payer, _, _, _, _ = await seed(payments_db)
++    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
++        first = (await client.post("/api/v1/charges", headers=auth(requester),
++                                  json={"payer_alias": "payer", "amount": 1, "concept": "Uno"})).json()["id"]
++        second = (await client.post("/api/v1/charges", headers=auth(requester),
++                                   json={"payer_alias": "payer", "amount": 1, "concept": "Dos"})).json()["id"]
++        denied = await client.post(f"/api/v1/charges/{first}/reject", headers=auth(requester))
++        reject = await client.post(f"/api/v1/charges/{first}/reject", headers=auth(payer))
++        denied_cancel = await client.post(f"/api/v1/charges/{second}/cancel", headers=auth(payer))
++        cancel = await client.post(f"/api/v1/charges/{second}/cancel", headers=auth(requester))
++        terminal = await client.post(f"/api/v1/charges/{first}/pay", headers=auth(payer, key=True))
++    assert denied.status_code == denied_cancel.status_code == 403
++    assert reject.status_code == cancel.status_code == 200
++    assert reject.json()["status"] == "REJECTED" and cancel.json()["status"] == "CANCELLED"
++    assert terminal.status_code == 409
++
++
++@pytest.mark.asyncio
++async def test_concurrent_payment_creates_exactly_one_ledger_entry(payments_db):
++    requester, payer, admin, _, payer_acc, _ = await seed(payments_db)
++    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
++        await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
++                          json={"target_user_alias": "payer", "amount": 50000, "concept": "Recarga"})
++        charge_id = (await client.post("/api/v1/charges", headers=auth(requester),
++                                       json={"payer_alias": "payer", "amount": 50000,
++                                             "concept": "Simultáneo"})).json()["id"]
++        responses = await asyncio.gather(*(
++            client.post(f"/api/v1/charges/{charge_id}/pay", headers=auth(payer, key=True))
++            for _ in range(2)
++        ))
++    assert sorted(response.status_code for response in responses) == [200, 409]
++    async with payments_db() as session:
++        assert await calculate_account_balance(payer_acc.id, session) == 0
++        assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 2
+-- 
+2.51.1
+

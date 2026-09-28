@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from app.core.idempotency import IdempotencyMiddleware
 from app.modules.identity.adapters.controllers import limiter, router
 from app.modules.ledger.adapters.controllers import router as ledger_router
+from app.modules.payment_requests.adapters.controllers import router as charges_router
 
 app = FastAPI(title="HabiCapital P2P API")
 app.state.limiter = limiter
@@ -37,3 +38,4 @@ async def rate_limit_error(request, exc):
 app.add_middleware(IdempotencyMiddleware)
 app.include_router(router)
 app.include_router(ledger_router)
+app.include_router(charges_router)

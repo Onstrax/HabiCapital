@@ -14,11 +14,13 @@ from app.modules.identity.adapters.controllers import (
     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
 )
 from app.modules.ledger.domain.services import calculate_account_balance
-from app.modules.ledger.infrastructure.models import AccountModel, UserModel
+from app.modules.ledger.infrastructure.models import AccountModel, AccountType, UserModel, UserRole
+from app.modules.ledger.use_cases.admin_topup import execute_admin_topup
 from app.modules.ledger.use_cases.transfer_money import execute_p2p_transfer_transactional
+from app.shared.utils.security_utils import sanitize_alias
 from app.shared.exceptions import (
     AccountNotFoundException, BalanceLimitExceededException, InsufficientFundsException,
-    SelfTransferForbiddenException,
+    OmnibusConfigurationException, SelfTransferForbiddenException,
 )
 
 router = APIRouter(prefix="/api/v1")
@@ -44,6 +46,20 @@ class BalanceResponse(StrictSchema):
     account_id: uuid.UUID
     balance: int
     currency: str = "COP"
+
+
+class TopupRequest(StrictSchema):
+    target_user_alias: str
+    amount: int = Field(gt=0, le=2**63 - 1)
+    concept: str = Field(min_length=1, max_length=255)
+
+
+class TopupResponse(StrictSchema):
+    reference_id: str
+    target_alias: str
+    amount_credited: int
+    new_target_balance: int
+    timestamp: datetime
 
 
 @router.post("/transfers/execute", response_model=TransferResponse, status_code=201)
@@ -107,3 +123,45 @@ async def get_balance(request: Request, session: AsyncSession = Depends(get_db))
         return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta no encontrada")
     return BalanceResponse(account_id=account.id,
                            balance=await calculate_account_balance(account.id, session))
+
+
+@router.post("/admin/topup", response_model=TopupResponse)
+async def admin_topup(request: Request, payload: TopupRequest,
+                      session: AsyncSession = Depends(get_db)):
+    admin_id = await current_user_id(request)
+    if isinstance(admin_id, JSONResponse):
+        return admin_id
+    try:
+        alias = sanitize_alias(payload.target_user_alias)
+    except ValueError:
+        return api_error(422, "VALIDATION_ERROR", "Alias inválido")
+    try:
+        async with session.begin():
+            admin = await session.get(UserModel, admin_id)
+            if admin is None or not admin.is_active or admin.role != UserRole.ADMIN:
+                return api_error(403, "FORBIDDEN", "Solo el administrador puede recargar")
+            target = (await session.execute(select(UserModel).where(
+                UserModel.alias == alias, UserModel.is_active.is_(True)))).scalar_one_or_none()
+            if target is None:
+                return api_error(404, "USER_NOT_FOUND", "Usuario objetivo no encontrado")
+            account = (await session.execute(select(AccountModel).where(
+                AccountModel.user_id == target.id,
+                AccountModel.type == AccountType.USER_WALLET))).scalar_one_or_none()
+            if account is None:
+                return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta objetivo no encontrada")
+            tx, balance = await execute_admin_topup(
+                session, admin_id, account.id, payload.amount, payload.concept,
+                "TOPUP-" + uuid.uuid4().hex,
+            )
+            response = TopupResponse(reference_id=tx.reference_id, target_alias=target.alias,
+                                     amount_credited=payload.amount, new_target_balance=balance,
+                                     timestamp=tx.created_at)
+    except PermissionError:
+        return api_error(403, "FORBIDDEN", "Solo el administrador puede recargar")
+    except BalanceLimitExceededException:
+        return api_error(400, "BALANCE_LIMIT_EXCEEDED", "El saldo objetivo excedería el límite")
+    except (AccountNotFoundException, SelfTransferForbiddenException):
+        return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta objetivo no encontrada")
+    except OmnibusConfigurationException:
+        return api_error(503, "OMNIBUS_NOT_CONFIGURED", "Cuenta ómnibus no configurada")
+    return response
