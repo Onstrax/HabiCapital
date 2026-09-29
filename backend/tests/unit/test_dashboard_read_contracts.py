@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from app.modules.ledger.adapters import controllers as ledger
-from app.modules.ledger.infrastructure.models import PaymentRequestStatus, TransactionType
+from app.modules.ledger.infrastructure.models import PaymentRequestStatus, TransactionType, UserRole
 from app.modules.payment_requests.adapters import controllers as charges
 
 pytestmark = pytest.mark.asyncio
@@ -27,7 +27,7 @@ async def test_ledger_history_sign_and_scope(monkeypatch):
                             amount=50000, created_at=datetime.now(timezone.utc))
     tx = SimpleNamespace(reference_id="TOPUP-1", type=TransactionType.TOPUP, concept="Inicial")
     session = AsyncMock(spec=AsyncSession)
-    session.get.return_value = SimpleNamespace(id=actor, is_active=True)
+    session.get.return_value = SimpleNamespace(id=actor, is_active=True, role=UserRole.USER)
     session.execute.side_effect = [Mock(scalar_one_or_none=Mock(return_value=wallet)),
                                    Mock(all=Mock(return_value=[(entry, tx, "treasury", "user")]))]
     monkeypatch.setattr(ledger, "current_user_id", AsyncMock(return_value=actor))
@@ -42,7 +42,7 @@ async def test_pending_charge_projection_only_returns_query_rows(monkeypatch):
     model = SimpleNamespace(id=uuid.uuid4(), amount=1234, concept="Almuerzo",
                             status=PaymentRequestStatus.PENDING, created_at=datetime.now(timezone.utc))
     session = AsyncMock(spec=AsyncSession)
-    session.get.return_value = SimpleNamespace(id=actor, is_active=True)
+    session.get.return_value = SimpleNamespace(id=actor, is_active=True, role=UserRole.USER)
     session.execute.return_value = Mock(all=Mock(return_value=[(model, "sender", "recipient")]))
     monkeypatch.setattr(charges, "current_user_id", AsyncMock(return_value=actor))
     response = await charges.list_charges(request("/api/v1/charges"), PaymentRequestStatus.PENDING, session)

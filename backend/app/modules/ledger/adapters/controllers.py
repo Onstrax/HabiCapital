@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.core.field_encryption import blind_index
 from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
@@ -94,13 +95,14 @@ async def execute_transfer(request: Request, payload: TransferRequest,
     try:
         async with session.begin():
             sender = await session.get(UserModel, sender_id)
-            if sender is None or not sender.is_active:
+            if sender is None or not sender.is_active or sender.role != UserRole.USER:
                 return api_error(401, "UNAUTHORIZED", "Token inválido")
             recipient = await session.get(UserModel, payload.recipient_id)
-            if recipient is None or not recipient.is_active:
+            if recipient is None or not recipient.is_active or recipient.role != UserRole.USER:
                 return api_error(404, "RECIPIENT_NOT_FOUND", "Destinatario no encontrado")
             accounts = (await session.execute(select(AccountModel).where(
-                AccountModel.user_id.in_([sender_id, payload.recipient_id])))).scalars().all()
+                AccountModel.user_id.in_([sender_id, payload.recipient_id]),
+                AccountModel.type == AccountType.USER_WALLET))).scalars().all()
             by_user = {account.user_id: account for account in accounts}
             if sender_id not in by_user or payload.recipient_id not in by_user:
                 return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta no encontrada")
@@ -137,7 +139,8 @@ async def get_balance(request: Request, session: AsyncSession = Depends(get_db))
     if user is None or not user.is_active:
         return api_error(401, "UNAUTHORIZED", "Token inválido")
     account = (await session.execute(select(AccountModel).where(
-        AccountModel.user_id == user_id))).scalar_one_or_none()
+        AccountModel.user_id == user_id,
+        AccountModel.type == AccountType.USER_WALLET))).scalar_one_or_none()
     if account is None:
         return api_error(404, "ACCOUNT_NOT_FOUND", "Cuenta no encontrada")
     return BalanceResponse(account_id=account.id,
@@ -197,7 +200,8 @@ async def admin_topup(request: Request, payload: TopupRequest,
             if admin is None or not admin.is_active or admin.role != UserRole.ADMIN:
                 return api_error(403, "FORBIDDEN", "Solo el administrador puede recargar")
             target = (await session.execute(select(UserModel).where(
-                UserModel.alias == alias, UserModel.is_active.is_(True)))).scalar_one_or_none()
+                UserModel.alias_blind_index == blind_index(alias, "users.alias"), UserModel.is_active.is_(True),
+                UserModel.role == UserRole.USER))).scalar_one_or_none()
             if target is None:
                 return api_error(404, "USER_NOT_FOUND", "Usuario objetivo no encontrado")
             account = (await session.execute(select(AccountModel).where(

@@ -6,6 +6,7 @@ import uuid
 from sqlalchemy import select, text
 
 from app.core.config import get_settings
+from app.core.field_encryption import blind_index
 from app.core.database import get_session_factory
 from app.core.security import hash_password
 from app.modules.ledger.infrastructure.models import (
@@ -23,7 +24,7 @@ async def bootstrap_admin() -> None:
         existing_omnibus = (await session.execute(select(AccountModel).where(
             AccountModel.type == AccountType.SYSTEM_OMNIBUS))).scalars().all()
         admin = (await session.execute(select(UserModel).where(
-            UserModel.email == settings.ADMIN_EMAIL))).scalar_one_or_none()
+            UserModel.email_blind_index == blind_index(settings.ADMIN_EMAIL)))).scalar_one_or_none()
         if admin is None:
             if existing_omnibus:
                 raise RuntimeError("La cuenta ómnibus ya existe; requiere conciliación manual")

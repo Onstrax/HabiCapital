@@ -1,4 +1,4 @@
-export interface LoginResponse { access_token: string; expires_in: number; token_type: string }
+export interface LoginResponse { expires_in: number; token_type: string; role: "USER" | "ADMIN" }
 export interface RegisterResponse { id: string; email: string; alias: string; full_name: string }
 export interface Balance { account_id: string; balance: number; currency: "COP" }
 export interface Movement {

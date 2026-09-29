@@ -8,6 +8,9 @@ Desde la raíz del repositorio, copia la plantilla de entorno y levanta todo:
 
 ```bash
 cp backend/.env.example backend/.env
+cd backend
+python -m scripts.init_pii_keys
+cd ..
 docker compose up --build -d
 ```
 
@@ -46,9 +49,28 @@ An uncertain operation remains `PROCESSING` and a failed operation remains
 `FAILED`; a retry with the same key returns 409 until its result is reconciled.
 Do not delete such records by age without reconciling any possible ledger entry.
 
-The current schema from SPEC-02 persists email, full name and concepts without
-field encryption. AES-256-GCM and blind indexing from SPEC-03 v2 require a
-separate schema and data migration before handling real personal data.
+## Privacidad de datos existentes
+
+Antes de levantar la API con esta versión, realiza un respaldo de PostgreSQL y
+de `backend/.env`. Crea las dos claves PII **antes** de ejecutar Alembic:
+
+```bash
+cd backend
+python -m scripts.init_pii_keys
+cd ..
+docker compose up --build -d
+docker compose exec api alembic current
+```
+
+El inicio de la API aplica automáticamente la migración `c82e91d7a0f4` en una
+transacción. Esta cifra los correos, nombres, alias, conceptos, payloads de
+auditoría, IP y respuestas de idempotencia mediante AES-256-GCM, y agrega índices
+ciegos HMAC para búsquedas exactas de correo y alias. Conserva estas claves sin
+rotarlas ni perderlas: sin ellas la información cifrada no puede recuperarse.
+El hash de contraseña Argon2id y los identificadores técnicos permanecen tal
+como estaban. Los respaldos previos, WAL y volcados históricos pueden seguir
+conteniendo los datos anteriores en texto plano y deben gestionarse aparte.
+No ejecutes una versión vieja del backend sobre el esquema nuevo.
 
 ## Transferencias P2P
 

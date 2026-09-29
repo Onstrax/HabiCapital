@@ -2,6 +2,8 @@
 
 Next.js 14 con App Router, React Query y Tailwind. La ruta `/api/v1/*` funciona como proxy hacia FastAPI; el navegador solo habla con Next.js.
 
+Tras iniciar sesión, Next.js guarda el JWT en una cookie `HttpOnly`, `SameSite=Strict` de hasta 15 minutos. El cliente JavaScript nunca recibe el token. El proxy comprueba el origen de las peticiones POST y adjunta el JWT al llamar a FastAPI. Cerrar sesión borra la cookie del navegador. En un despliegue HTTPS configura `SESSION_COOKIE_SECURE=true`; para el desarrollo local HTTP permanece desactivado. El acceso directo a `http://localhost:8000/docs` sigue usando el botón **Authorize** y un JWT copiado desde la respuesta de login de FastAPI.
+
 ## Desarrollo local
 
 Desde la raíz, inicia PostgreSQL y la API: `docker compose up -d db api`. En otra terminal:

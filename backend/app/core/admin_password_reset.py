@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.field_encryption import blind_index
 from app.core.database import get_session_factory
 from app.core.security import hash_password, verify_password
 from app.modules.ledger.infrastructure.models import AuditLogModel, UserModel, UserRole
@@ -21,7 +22,7 @@ async def rotate_admin_password(session: AsyncSession, email: str, new_password:
         raise ValueError("La contraseña debe tener entre 12 y 128 caracteres")
 
     admin = (await session.execute(
-        select(UserModel).where(UserModel.email == email).with_for_update()
+        select(UserModel).where(UserModel.email_blind_index == blind_index(email)).with_for_update()
     )).scalar_one_or_none()
     if admin is None or admin.role != UserRole.ADMIN or not admin.is_active:
         raise RuntimeError("No existe un administrador activo para el ADMIN_EMAIL configurado")

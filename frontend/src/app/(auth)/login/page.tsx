@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
-import { api, ApiError, setAccessToken } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import type { LoginResponse } from "@/lib/contracts";
 
 const schema = z.object({ email: z.string().email("Ingresa un correo válido"), password: z.string().min(1, "Ingresa tu contraseña") });
@@ -22,9 +22,8 @@ export default function LoginPage() {
   async function submit(values: Values) {
     setError("");
     try {
-      const result = await api.post<LoginResponse>("/auth/login", values);
-      setAccessToken(result.access_token);
-      router.replace("/");
+      const session = await api.post<LoginResponse>("/auth/login", values);
+      router.replace(session.role === "ADMIN" ? "/admin" : "/");
     } catch (cause) {
       setError(cause instanceof ApiError && cause.code === "INVALID_CREDENTIALS"
         ? "El correo o la contraseña no son correctos." : "No pudimos iniciar sesión. Intenta de nuevo.");

@@ -1,6 +1,7 @@
 """Isolated PostgreSQL fixtures with independent sessions for concurrent HTTP requests."""
 
 import os
+import base64
 import uuid
 
 import httpx
@@ -15,6 +16,9 @@ from app.core.config import get_settings
 from app.core.database import get_db
 from app.main import app
 from app.modules.ledger.infrastructure.models import Base
+
+os.environ.setdefault("PII_ENCRYPTION_KEY", base64.b64encode(b"E" * 32).decode())
+os.environ.setdefault("PII_BLIND_INDEX_KEY", base64.b64encode(b"B" * 32).decode())
 
 
 @pytest_asyncio.fixture

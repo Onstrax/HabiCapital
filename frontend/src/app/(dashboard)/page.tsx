@@ -8,7 +8,7 @@ import { Brand } from "@/components/Brand";
 import { PaymentRequestsList } from "@/components/charges/PaymentRequestsList";
 import { CreateChargeModal } from "@/components/charges/CreateChargeModal";
 import { TransferModal } from "@/components/transfer/TransferModal";
-import { api, getAccessToken, setAccessToken } from "@/lib/api-client";
+import { api } from "@/lib/api-client";
 import { formatCOP, formatDate, type Balance, type Movement } from "@/lib/contracts";
 import { clearChargeKey, clearTransferKey } from "@/lib/financial-retry";
 
@@ -20,8 +20,8 @@ export default function Dashboard() {
   const [chargeOpen, setChargeOpen] = useState(false);
   const [waking, setWaking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const signOut = useCallback(() => {
-    setAccessToken(null);
+  const signOut = useCallback(async () => {
+    await api.post("/auth/logout").catch(() => {});
     clearTransferKey();
     clearChargeKey();
     queryClient.clear();
@@ -29,8 +29,11 @@ export default function Dashboard() {
   }, [queryClient, router]);
 
   useEffect(() => {
-    if (!getAccessToken()) { router.replace("/login"); return; }
-    setReady(true);
+    void api.get<{ authenticated: boolean; role: "USER" | "ADMIN" }>("/auth/session")
+      .then((session) => {
+        if (session.role === "ADMIN") router.replace("/admin");
+        else setReady(true);
+      }).catch(() => router.replace("/login"));
     window.addEventListener("habicapital:unauthorized", signOut);
     return () => window.removeEventListener("habicapital:unauthorized", signOut);
   }, [router, signOut]);
@@ -46,7 +49,7 @@ export default function Dashboard() {
   return <div className="min-h-screen">
     <header className="border-b border-[#e5eae3] bg-white"><div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4 sm:px-8 lg:px-10">
       <Brand /><div className="flex items-center gap-3"><span className="hidden rounded-full bg-mint px-3 py-2 text-xs font-semibold text-forest sm:inline-flex"><ShieldCheck size={15} className="mr-1" /> Tu espacio seguro</span>
-        <button type="button" onClick={signOut} className="inline-flex items-center gap-2 rounded-xl p-2 text-sm text-[#526c5e] hover:bg-cream sm:px-3" aria-label="Cerrar sesión"><LogOut size={18} /><span className="hidden sm:inline">Salir</span></button></div></div></header>
+        <button type="button" onClick={() => void signOut()} className="inline-flex items-center gap-2 rounded-xl p-2 text-sm text-[#526c5e] hover:bg-cream sm:px-3" aria-label="Cerrar sesión"><LogOut size={18} /><span className="hidden sm:inline">Salir</span></button></div></div></header>
     <main className="mx-auto max-w-6xl px-5 pb-24 pt-9 sm:px-8 sm:pt-12 lg:px-10">
       <div className="mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="text-sm font-semibold text-[#468d70]">TU ESPACIO FINANCIERO</p>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight sm:text-4xl">Todo en un solo lugar.</h1><p className="mt-2 text-[#66796e]">Mueve tu dinero con tranquilidad.</p></div>

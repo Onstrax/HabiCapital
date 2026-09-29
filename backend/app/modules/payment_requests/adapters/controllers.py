@@ -11,12 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.core.field_encryption import blind_index
 from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
 )
 from app.modules.ledger.infrastructure.models import (
-    AccountModel, AccountType, PaymentRequestModel, PaymentRequestStatus, UserModel,
+    AccountModel, AccountType, PaymentRequestModel, PaymentRequestStatus, UserModel, UserRole,
 )
 from app.modules.payment_requests.use_cases.charges import (
     InsufficientChargePayment, cancel_charge, create_charge_request,
@@ -82,6 +83,8 @@ async def list_charges(request: Request, status: PaymentRequestStatus = Query(Pa
     user = await session.get(UserModel, payer_id)
     if user is None or not user.is_active:
         return api_error(401, "UNAUTHORIZED", "Token inválido")
+    if user.role != UserRole.USER:
+        return api_error(403, "FORBIDDEN", "Esta vista es exclusiva para usuarios")
     requester_account, payer_account = aliased(AccountModel), aliased(AccountModel)
     requester, payer = aliased(UserModel), aliased(UserModel)
     rows = (await session.execute(
@@ -114,10 +117,11 @@ async def create_charge(request: Request, payload: ChargeRequest,
         return api_error(422, "VALIDATION_ERROR", "Alias inválido")
     async with session.begin():
         requester = await session.get(UserModel, requester_id)
-        if requester is None or not requester.is_active:
+        if requester is None or not requester.is_active or requester.role != UserRole.USER:
             return api_error(401, "UNAUTHORIZED", "Token inválido")
         payer = (await session.execute(select(UserModel).where(
-            UserModel.alias == alias, UserModel.is_active.is_(True)))).scalar_one_or_none()
+            UserModel.alias_blind_index == blind_index(alias, "users.alias"), UserModel.is_active.is_(True),
+            UserModel.role == UserRole.USER))).scalar_one_or_none()
         if payer is None:
             return api_error(404, "PAYER_NOT_FOUND", "Pagador no encontrado")
         if payer.id == requester.id:
@@ -148,7 +152,7 @@ async def pay_charge(request: Request, charge_id: uuid.UUID,
     try:
         async with session.begin():
             actor = await session.get(UserModel, payer_id)
-            if actor is None or not actor.is_active:
+            if actor is None or not actor.is_active or actor.role != UserRole.USER:
                 return api_error(401, "UNAUTHORIZED", "Token inválido")
             outcome = await process_charge_payment(session, charge_id, payer_id,
                                                    "TRF-" + uuid.uuid4().hex)
@@ -181,7 +185,7 @@ async def reject(request: Request, charge_id: uuid.UUID,
     try:
         async with session.begin():
             actor = await session.get(UserModel, payer_id)
-            if actor is None or not actor.is_active:
+            if actor is None or not actor.is_active or actor.role != UserRole.USER:
                 return api_error(401, "UNAUTHORIZED", "Token inválido")
             charge = await reject_charge(session, charge_id, payer_id)
             response = TransitionResponse(charge_id=charge.id, status=charge.status.value)
@@ -200,7 +204,7 @@ async def cancel(request: Request, charge_id: uuid.UUID,
     try:
         async with session.begin():
             actor = await session.get(UserModel, requester_id)
-            if actor is None or not actor.is_active:
+            if actor is None or not actor.is_active or actor.role != UserRole.USER:
                 return api_error(401, "UNAUTHORIZED", "Token inválido")
             charge = await cancel_charge(session, charge_id, requester_id)
             response = TransitionResponse(charge_id=charge.id, status=charge.status.value)

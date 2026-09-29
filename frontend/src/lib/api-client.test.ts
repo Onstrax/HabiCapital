@@ -1,21 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, setAccessToken } from "./api-client";
+import { api, ApiError } from "./api-client";
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  setAccessToken(null);
 });
 
 describe("api client", () => {
-  it("uses the JWT and a distinct UUIDv4 for each POST", async () => {
-    setAccessToken("jwt-example");
+  it("never exposes a JWT to browser code and uses a distinct UUIDv4 for each POST", async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     vi.stubGlobal("fetch", fetcher);
     await api.post("/transfers/lookup", { recipient_alias: "carlos_dev" });
     await api.post("/transfers/execute", { recipient_id: "123", amount: 100, concept: "Pago" });
     const first = fetcher.mock.calls[0][1];
     const second = fetcher.mock.calls[1][1];
-    expect(first.headers.Authorization).toBe("Bearer jwt-example");
+    expect(first.headers.Authorization).toBeUndefined();
     expect(first.headers["X-Idempotency-Key"]).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i);
     expect(first.headers["X-Idempotency-Key"]).not.toBe(second.headers["X-Idempotency-Key"]);
   });

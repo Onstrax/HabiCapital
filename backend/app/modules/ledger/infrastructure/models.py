@@ -10,6 +10,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from app.core.field_encryption import EncryptedJSON, EncryptedText, blind_index
 
 
 class Base(DeclarativeBase):
@@ -65,13 +66,19 @@ def created_timestamp() -> Mapped[datetime]:
 
 class UserModel(Base):
     __tablename__ = "users"
-    __table_args__ = (CheckConstraint("alias ~ '^[a-z0-9_]{3,20}$'", name="chk_alias_format"),)
+    __table_args__ = (CheckConstraint("alias_blind_index ~ '^[0-9a-f]{64}$'", name="chk_alias_blind_index"),)
 
     id: Mapped[uuid.UUID] = primary_uuid()
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
-    alias: Mapped[str] = mapped_column(String(20), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(EncryptedText("users.email"), nullable=False)
+    email_blind_index: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False,
+        default=lambda context: blind_index(context.get_current_parameters()["email"]))
+    alias: Mapped[str] = mapped_column(EncryptedText("users.alias"), nullable=False)
+    alias_blind_index: Mapped[str] = mapped_column(
+        String(64), unique=True, index=True, nullable=False,
+        default=lambda context: blind_index(context.get_current_parameters()["alias"], "users.alias"))
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    full_name: Mapped[str] = mapped_column(String(150), nullable=False)
+    full_name: Mapped[str] = mapped_column(EncryptedText("users.full_name"), nullable=False)
     role: Mapped[UserRole] = mapped_column(pg_enum(UserRole, "user_role"), nullable=False,
                                          default=UserRole.USER, server_default=text("'USER'"))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True,
@@ -104,7 +111,7 @@ class TransactionModel(Base):
     reference_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     type: Mapped[TransactionType] = mapped_column(pg_enum(TransactionType, "transaction_type"), nullable=False)
     status: Mapped[TransactionStatus] = mapped_column(pg_enum(TransactionStatus, "transaction_status"), nullable=False)
-    concept: Mapped[str] = mapped_column(String(255), nullable=False)
+    concept: Mapped[str] = mapped_column(EncryptedText("transactions.concept"), nullable=False)
     created_at: Mapped[datetime] = created_timestamp()
 
 
@@ -139,7 +146,7 @@ class PaymentRequestModel(Base):
     requester_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
     payer_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
     amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    concept: Mapped[str] = mapped_column(String(255), nullable=False)
+    concept: Mapped[str] = mapped_column(EncryptedText("payment_requests.concept"), nullable=False)
     status: Mapped[PaymentRequestStatus] = mapped_column(pg_enum(PaymentRequestStatus, "payment_request_status"), nullable=False,
                                                         default=PaymentRequestStatus.PENDING, server_default=text("'PENDING'"))
     created_at: Mapped[datetime] = created_timestamp()
@@ -157,7 +164,7 @@ class IdempotencyRecordModel(Base):
     status: Mapped[IdempotencyStatus] = mapped_column(pg_enum(IdempotencyStatus, "idempotency_status"), nullable=False,
                                                      default=IdempotencyStatus.PROCESSING, server_default=text("'PROCESSING'"))
     response_code: Mapped[int | None] = mapped_column(SmallInteger)
-    response_body: Mapped[dict | None] = mapped_column(JSONB)
+    response_body: Mapped[dict | None] = mapped_column(EncryptedJSON("idempotency_records.response_body"))
     created_at: Mapped[datetime] = created_timestamp()
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
@@ -168,6 +175,6 @@ class AuditLogModel(Base):
     id: Mapped[uuid.UUID] = primary_uuid()
     user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
     action: Mapped[str] = mapped_column(String(100), nullable=False)
-    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
-    ip_address: Mapped[str | None] = mapped_column(String(45))
+    payload: Mapped[dict] = mapped_column(EncryptedJSON("audit_logs.payload"), nullable=False, default=dict)
+    ip_address: Mapped[str | None] = mapped_column(EncryptedText("audit_logs.ip_address"))
     created_at: Mapped[datetime] = created_timestamp()

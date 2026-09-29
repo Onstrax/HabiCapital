@@ -67,6 +67,12 @@ class LoginResponse(StrictSchema):
     access_token: str
     token_type: str = "bearer"
     expires_in: int = 900
+    role: str
+
+
+class SessionResponse(StrictSchema):
+    authenticated: bool = True
+    role: str
 
 
 class LookupRequest(StrictSchema):
@@ -113,9 +119,23 @@ async def login(request: Request, payload: LoginRequest, repo: IdentityRepositor
                                    verify_password, DUMMY_PASSWORD_HASH)
     if not user:
         return api_error(401, "INVALID_CREDENTIALS", "Credenciales inválidas")
-    token = create_access_token({"sub": str(user.id), "email": user.email,
-                                 "alias": user.alias, "role": user.role})
-    return LoginResponse(access_token=token, expires_in=get_settings().ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    # JWT payloads are only encoded, not encrypted. Do not put PII in claims.
+    token = create_access_token({"sub": str(user.id)})
+    return LoginResponse(access_token=token, expires_in=get_settings().ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+                         role=user.role)
+
+
+@router.get("/auth/me", response_model=SessionResponse,
+            dependencies=[Depends(bearer_auth)])
+async def get_current_session(request: Request,
+                              repo: IdentityRepository = Depends(get_identity_repository)):
+    user_id = await current_user_id(request)
+    if isinstance(user_id, JSONResponse):
+        return user_id
+    user = await repo.find_by_id(user_id)
+    if user is None or not user.is_active:
+        return api_error(401, "UNAUTHORIZED", "Token inválido")
+    return SessionResponse(role=user.role)
 
 
 async def current_user_id(request: Request) -> uuid.UUID | JSONResponse:
@@ -138,7 +158,7 @@ async def lookup(request: Request, payload: LookupRequest,
     if isinstance(user_id, JSONResponse):
         return user_id
     actor = await repo.find_by_id(user_id)
-    if not actor or not actor.is_active:
+    if not actor or not actor.is_active or actor.role != "USER":
         return api_error(401, "UNAUTHORIZED", "Token inválido")
     found = await lookup_recipient(repo, payload.recipient_alias)
     if not found:

@@ -35,14 +35,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict[str, Any], *, settings: Settings | None = None) -> str:
     settings = settings or get_settings()
-    required = {"sub", "email", "role", "alias"}
-    if not required <= data.keys():
+    if "sub" not in data:
         raise ValueError("Missing required access token claims")
     uuid.UUID(str(data["sub"]))
-    if data["role"] not in {"USER", "ADMIN"}:
-        raise ValueError("Invalid role")
     now = datetime.now(timezone.utc)
-    claims = {key: str(data[key]) for key in ("sub", "email", "role", "alias")}
+    claims = {"sub": str(data["sub"])}
     claims.update(iat=now, nbf=now,
                   exp=now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES))
     return jwt.encode(claims, settings.JWT_SECRET_KEY, algorithm="HS256")
@@ -51,13 +48,9 @@ def create_access_token(data: dict[str, Any], *, settings: Settings | None = Non
 def decode_access_token(token: str, *, settings: Settings | None = None) -> dict[str, Any]:
     settings = settings or get_settings()
     claims = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=["HS256"],
-                        options={"require": ["sub", "email", "role", "alias", "exp", "iat", "nbf"]})
+                        options={"require": ["sub", "exp", "iat", "nbf"]})
     try:
         uuid.UUID(claims["sub"])
-        if claims["role"] not in {"USER", "ADMIN"}:
-            raise ValueError("Invalid role")
-        if not claims["email"] or not claims["alias"]:
-            raise ValueError("Missing identity")
     except (ValueError, TypeError, KeyError) as exc:
         raise jwt.InvalidTokenError("Invalid identity claims") from exc
     return claims

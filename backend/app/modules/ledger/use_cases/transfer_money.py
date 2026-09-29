@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ledger.domain.services import calculate_account_balance
 from app.modules.ledger.infrastructure.models import (
-    AccountModel, AuditLogModel, LedgerEntryModel, TransactionModel,
+    AccountModel, AccountType, AuditLogModel, LedgerEntryModel, TransactionModel,
     TransactionStatus, TransactionType,
 )
 from app.shared.exceptions import (
@@ -45,6 +45,8 @@ async def execute_p2p_transfer_transactional(
     accounts = {account.id: account for account in locked}
     if sender_account_id not in accounts or recipient_account_id not in accounts:
         raise AccountNotFoundException("Cuenta emisora o receptora no encontrada")
+    if any(account.type != AccountType.USER_WALLET for account in accounts.values()):
+        raise AccountNotFoundException("Las transferencias requieren dos billeteras de usuario")
 
     balance = await calculate_account_balance(sender_account_id, session)
     if balance < amount:

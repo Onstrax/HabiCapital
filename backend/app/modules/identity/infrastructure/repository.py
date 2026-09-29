@@ -4,6 +4,7 @@ import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.field_encryption import blind_index
 
 from app.modules.identity.use_cases.identity import Identity
 from app.modules.ledger.infrastructure.models import AccountModel, AccountType, UserModel
@@ -33,11 +34,13 @@ class SqlIdentityRepository:
         return result
 
     async def find_by_email(self, email: str) -> Identity | None:
-        row = (await self.session.execute(select(UserModel).where(UserModel.email == email))).scalar_one_or_none()
+        row = (await self.session.execute(select(UserModel).where(
+            UserModel.email_blind_index == blind_index(email)))).scalar_one_or_none()
         return identity_from_row(row) if row else None
 
     async def find_by_alias(self, alias: str) -> Identity | None:
-        row = (await self.session.execute(select(UserModel).where(UserModel.alias == alias))).scalar_one_or_none()
+        row = (await self.session.execute(select(UserModel).where(
+            UserModel.alias_blind_index == blind_index(alias, "users.alias")))).scalar_one_or_none()
         return identity_from_row(row) if row else None
 
     async def find_by_id(self, user_id: uuid.UUID) -> Identity | None:

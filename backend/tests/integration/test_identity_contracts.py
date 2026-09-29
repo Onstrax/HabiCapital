@@ -33,6 +33,7 @@ def test_register_login_and_exact_lookup_contracts():
     repo.register.return_value = existing
     repo.find_by_email.return_value = existing
     repo.find_by_alias.return_value = existing
+    repo.find_by_id.return_value = existing
     app.dependency_overrides[get_identity_repository] = lambda: repo
     try:
         with TestClient(app) as client:
@@ -48,7 +49,11 @@ def test_register_login_and_exact_lookup_contracts():
             })
             assert logged_in.status_code == 200
             assert logged_in.json()["expires_in"] == 900
+            assert logged_in.json()["role"] == "USER"
             token = logged_in.json()["access_token"]
+            session = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+            assert session.status_code == 200
+            assert session.json() == {"authenticated": True, "role": "USER"}
             looked_up = client.post("/api/v1/transfers/lookup", json={"recipient_alias": "juan_1"},
                                     headers={"Authorization": f"Bearer {token}"})
             assert looked_up.status_code == 200

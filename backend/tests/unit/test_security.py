@@ -33,7 +33,8 @@ def test_jwt_claims_expiration_signature_and_algorithm(settings):
     claims = {"sub": user_id, "email": "a@example.test", "role": "USER", "alias": "user_a"}
     token = create_access_token(claims, settings=settings)
     decoded = decode_access_token(token, settings=settings)
-    assert all(decoded[k] == v for k, v in claims.items())
+    assert decoded["sub"] == user_id
+    assert not {"email", "role", "alias"}.intersection(decoded)
     assert decoded["exp"] - decoded["iat"] == 15 * 60
     assert decoded["nbf"] == decoded["iat"]
     with pytest.raises(jwt.InvalidTokenError):
@@ -50,10 +51,7 @@ def test_password_and_token_invalid_inputs(settings):
         hash_password(None)
     assert not verify_password("x", "not-a-valid-hash")
     with pytest.raises(ValueError):
-        create_access_token({"sub": str(uuid.uuid4())}, settings=settings)
-    with pytest.raises(ValueError):
-        create_access_token({"sub": str(uuid.uuid4()), "email": "e", "alias": "a",
-                             "role": "ROOT"}, settings=settings)
+        create_access_token({}, settings=settings)
     with pytest.raises(ValueError):
         create_access_token({"sub": "not-a-uuid", "email": "e", "alias": "a",
                              "role": "USER"}, settings=settings)
@@ -62,15 +60,6 @@ def test_password_and_token_invalid_inputs(settings):
                            settings.JWT_SECRET_KEY, algorithm="HS256")
     with pytest.raises(jwt.InvalidTokenError):
         decode_access_token(malformed, settings=settings)
-    wrong_role = jwt.encode({"sub": str(uuid.uuid4()), "email": "e", "alias": "a", "role": "ROOT",
-                             "exp": 9999999999, "iat": 1, "nbf": 1},
-                            settings.JWT_SECRET_KEY, algorithm="HS256")
-    with pytest.raises(jwt.InvalidTokenError):
-        decode_access_token(wrong_role, settings=settings)
-    empty_identity = create_access_token({"sub": str(uuid.uuid4()), "email": "", "alias": "",
-                                         "role": "USER"}, settings=settings)
-    with pytest.raises(jwt.InvalidTokenError):
-        decode_access_token(empty_identity, settings=settings)
 
 
 @pytest.mark.parametrize("name,masked", [

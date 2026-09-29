@@ -33,6 +33,7 @@ services:
     build: ./frontend
     environment:
       BACKEND_URL: http://api:8000
+      APP_ORIGIN: http://localhost:3001
     ports:
       - "${FRONTEND_PORT:-3001}:3000"
     depends_on:

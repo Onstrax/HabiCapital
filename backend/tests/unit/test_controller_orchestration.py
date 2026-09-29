@@ -31,8 +31,8 @@ def query_result(*, row=None, rows=None):
 async def test_transfer_controller_passes_user_wallet_ids_and_formats_success(monkeypatch):
     sender_id, recipient_id = uuid.uuid4(), uuid.uuid4()
     sender_account, recipient_account = uuid.uuid4(), uuid.uuid4()
-    sender = SimpleNamespace(id=sender_id, is_active=True, alias="sender")
-    recipient = SimpleNamespace(id=recipient_id, is_active=True, alias="recipient")
+    sender = SimpleNamespace(id=sender_id, is_active=True, alias="sender", role=UserRole.USER)
+    recipient = SimpleNamespace(id=recipient_id, is_active=True, alias="recipient", role=UserRole.USER)
     session = AsyncMock(spec=AsyncSession)
     session.get.side_effect = [sender, recipient]
     session.execute.return_value = query_result(rows=[
@@ -54,6 +54,21 @@ async def test_transfer_controller_passes_user_wallet_ids_and_formats_success(mo
     assert response.amount == 50000
     assert transfer.await_args.kwargs["sender_account_id"] == sender_account
     assert transfer.await_args.kwargs["recipient_account_id"] == recipient_account
+
+
+async def test_admin_cannot_execute_user_wallet_transfer(monkeypatch):
+    actor_id, recipient_id = uuid.uuid4(), uuid.uuid4()
+    session = AsyncMock(spec=AsyncSession)
+    session.get.return_value = SimpleNamespace(id=actor_id, is_active=True,
+                                               role=UserRole.ADMIN)
+    monkeypatch.setattr(ledger, "current_user_id", AsyncMock(return_value=actor_id))
+    transfer = AsyncMock()
+    monkeypatch.setattr(ledger, "execute_p2p_transfer_transactional", transfer)
+    response = await ledger.execute_transfer(
+        request("/api/v1/transfers/execute"),
+        ledger.TransferRequest(recipient_id=recipient_id, amount=50000, concept="Test"), session)
+    assert response.status_code == 401
+    transfer.assert_not_awaited()
 
 
 async def test_balance_controller_derives_balance_for_authenticated_wallet(monkeypatch):
@@ -97,7 +112,7 @@ async def test_charge_controller_creates_pending_request_for_wallets(monkeypatch
     requester_id, payer_id = uuid.uuid4(), uuid.uuid4()
     requester_account, payer_account = uuid.uuid4(), uuid.uuid4()
     session = AsyncMock(spec=AsyncSession)
-    session.get.return_value = SimpleNamespace(id=requester_id, is_active=True, alias="requester")
+    session.get.return_value = SimpleNamespace(id=requester_id, is_active=True, alias="requester", role=UserRole.USER)
     session.execute.side_effect = [
         query_result(row=SimpleNamespace(id=payer_id, is_active=True, alias="payer")),
         query_result(rows=[SimpleNamespace(user_id=requester_id, id=requester_account),
@@ -121,7 +136,7 @@ async def test_charge_controller_creates_pending_request_for_wallets(monkeypatch
 async def test_charge_payment_controller_returns_paid_or_pending_audit_contract(monkeypatch):
     payer_id, charge_id = uuid.uuid4(), uuid.uuid4()
     session = AsyncMock(spec=AsyncSession)
-    session.get.return_value = SimpleNamespace(id=payer_id, is_active=True)
+    session.get.return_value = SimpleNamespace(id=payer_id, is_active=True, role=UserRole.USER)
     monkeypatch.setattr(charges, "current_user_id", AsyncMock(return_value=payer_id))
     paid = AsyncMock(return_value=SimpleNamespace(reference_id="TRF-PAID",
                                                   created_at=datetime.now(timezone.utc)))
@@ -139,7 +154,7 @@ async def test_charge_payment_controller_returns_paid_or_pending_audit_contract(
 async def test_reject_and_cancel_controllers_return_terminal_states(monkeypatch):
     actor_id, charge_id = uuid.uuid4(), uuid.uuid4()
     session = AsyncMock(spec=AsyncSession)
-    session.get.return_value = SimpleNamespace(id=actor_id, is_active=True)
+    session.get.return_value = SimpleNamespace(id=actor_id, is_active=True, role=UserRole.USER)
     monkeypatch.setattr(charges, "current_user_id", AsyncMock(return_value=actor_id))
     reject = AsyncMock(return_value=SimpleNamespace(id=charge_id, status=PaymentRequestStatus.REJECTED))
     cancel = AsyncMock(return_value=SimpleNamespace(id=charge_id, status=PaymentRequestStatus.CANCELLED))

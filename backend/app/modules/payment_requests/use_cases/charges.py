@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.ledger.infrastructure.models import (
-    AccountModel, AuditLogModel, PaymentRequestModel, PaymentRequestStatus,
+    AccountModel, AccountType, AuditLogModel, PaymentRequestModel, PaymentRequestStatus,
     TransactionType,
 )
 from app.modules.ledger.use_cases.transfer_money import (
@@ -50,7 +50,7 @@ async def _locked_pending_charge(session: AsyncSession, charge_id: uuid.UUID,
         raise ChargeNotFoundException("Cobro no encontrado")
     account_id = charge.payer_account_id if actor_side == "payer" else charge.requester_account_id
     account = await session.get(AccountModel, account_id)
-    if account is None or account.user_id != actor_id:
+    if account is None or account.user_id != actor_id or account.type != AccountType.USER_WALLET:
         raise ChargeForbiddenException("Acción no permitida para este cobro")
     if charge.status != PaymentRequestStatus.PENDING:
         raise ChargeStateConflictException("El cobro está en estado terminal")

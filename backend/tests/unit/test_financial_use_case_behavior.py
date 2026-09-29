@@ -33,8 +33,8 @@ def query_result(rows=None, row=None):
 async def test_transfer_locks_accounts_in_uuid_order_and_posts_one_balanced_entry(monkeypatch):
     sender_id, recipient_id = uuid.UUID(int=2), uuid.UUID(int=1)
     sender_user = uuid.uuid4()
-    sender = SimpleNamespace(id=sender_id, user_id=sender_user)
-    recipient = SimpleNamespace(id=recipient_id, user_id=uuid.uuid4())
+    sender = SimpleNamespace(id=sender_id, user_id=sender_user, type=AccountType.USER_WALLET)
+    recipient = SimpleNamespace(id=recipient_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET)
     session = AsyncMock(spec=AsyncSession)
     session.execute.return_value = query_result(rows=[recipient, sender])
     monkeypatch.setattr(transfer_money, "calculate_account_balance",
@@ -66,8 +66,8 @@ async def test_transfer_fails_before_inserting_any_financial_row(
     monkeypatch, balance, recipient_balance, expected,
 ):
     sender_id, recipient_id = uuid.uuid4(), uuid.uuid4()
-    accounts = [SimpleNamespace(id=sender_id, user_id=uuid.uuid4()),
-                SimpleNamespace(id=recipient_id, user_id=uuid.uuid4())]
+    accounts = [SimpleNamespace(id=sender_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET),
+                SimpleNamespace(id=recipient_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET)]
     session = AsyncMock(spec=AsyncSession)
     session.execute.return_value = query_result(rows=accounts)
     monkeypatch.setattr(transfer_money, "calculate_account_balance",
@@ -88,6 +88,21 @@ async def test_transfer_rejects_account_removed_before_the_lock():
             session, sender_id, recipient_id, 1, "Test", "TRF-MISSING",
         )
     session.add.assert_not_called()
+
+
+async def test_transfer_refuses_to_use_admin_omnibus_as_sender(monkeypatch):
+    sender_id, recipient_id = uuid.uuid4(), uuid.uuid4()
+    accounts = [SimpleNamespace(id=sender_id, user_id=uuid.uuid4(), type=AccountType.SYSTEM_OMNIBUS),
+                SimpleNamespace(id=recipient_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET)]
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value = query_result(rows=accounts)
+    calculate = AsyncMock(return_value=100000)
+    monkeypatch.setattr(transfer_money, "calculate_account_balance", calculate)
+    with pytest.raises(AccountNotFoundException):
+        await transfer_money.execute_p2p_transfer_transactional(
+            session, sender_id, recipient_id, 50000, "Test", "TRF-OMNIBUS")
+    session.add.assert_not_called()
+    calculate.assert_not_awaited()
 
 
 async def test_admin_topup_issues_exact_amount_from_omnibus_under_ordered_locks(monkeypatch):
@@ -137,6 +152,7 @@ def locked_charge_fixture():
     session.execute.return_value = query_result(row=charge)
     session.get.side_effect = lambda _, account_id: SimpleNamespace(
         user_id=payer_id if account_id == payer_account else requester_id,
+        type=AccountType.USER_WALLET,
     )
     return session, charge, payer_id, requester_id
 
@@ -191,7 +207,7 @@ async def test_charge_fails_closed_when_missing_unauthorized_or_terminal(change)
         session.execute.return_value = query_result(row=None)
     elif change == "wrong_actor":
         session.get.side_effect = None
-        session.get.return_value = SimpleNamespace(user_id=uuid.uuid4())
+        session.get.return_value = SimpleNamespace(user_id=uuid.uuid4(), type=AccountType.USER_WALLET)
     else:
         charge.status = PaymentRequestStatus.COMPLETED
     with pytest.raises(expected):

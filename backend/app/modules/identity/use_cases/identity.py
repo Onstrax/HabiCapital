@@ -44,4 +44,4 @@ async def authenticate_user(repo: IdentityRepository, email: str, password: str,
 
 async def lookup_recipient(repo: IdentityRepository, alias: str) -> tuple[Identity, str] | None:
     user = await repo.find_by_alias(sanitize_alias(alias))
-    return (user, mask_full_name(user.full_name)) if user and user.is_active else None
+    return (user, mask_full_name(user.full_name)) if user and user.is_active and user.role == "USER" else None
