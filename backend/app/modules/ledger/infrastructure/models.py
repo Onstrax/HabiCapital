@@ -3,9 +3,10 @@
 import enum
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
-    BigInteger, Boolean, CheckConstraint, ForeignKey, Index, SmallInteger,
+    BigInteger, Boolean, CheckConstraint, ForeignKey, Index, Numeric, SmallInteger,
     String, Enum as SQLEnum, func, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
@@ -138,14 +139,20 @@ class PaymentRequestModel(Base):
     __table_args__ = (
         CheckConstraint("amount > 0", name="chk_pr_positive_amount"),
         CheckConstraint("requester_account_id <> payer_account_id", name="chk_pr_different_accounts"),
+        CheckConstraint("(group_id IS NULL AND percentage IS NULL) OR "
+                        "(group_id IS NOT NULL AND percentage > 0 AND percentage <= 100)",
+                        name="chk_pr_group_percentage"),
         Index("idx_payment_requests_payer_status", "payer_account_id", "status"),
         Index("idx_payment_requests_requester_status", "requester_account_id", "status"),
+        Index("idx_payment_requests_group", "group_id"),
     )
 
     id: Mapped[uuid.UUID] = primary_uuid()
     requester_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
     payer_account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False)
     amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    percentage: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     concept: Mapped[str] = mapped_column(EncryptedText("payment_requests.concept"), nullable=False)
     status: Mapped[PaymentRequestStatus] = mapped_column(pg_enum(PaymentRequestStatus, "payment_request_status"), nullable=False,
                                                         default=PaymentRequestStatus.PENDING, server_default=text("'PENDING'"))

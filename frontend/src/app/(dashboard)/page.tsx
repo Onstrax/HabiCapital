@@ -3,6 +3,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownLeft, ArrowRight, ArrowUpRight, Clock3, HandCoins, LogOut, RefreshCw, Send, ShieldCheck, Wallet } from "lucide-react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { Brand } from "@/components/Brand";
 import { PaymentRequestsList } from "@/components/charges/PaymentRequestsList";
@@ -10,7 +11,7 @@ import { CreateChargeModal } from "@/components/charges/CreateChargeModal";
 import { TransferModal } from "@/components/transfer/TransferModal";
 import { api } from "@/lib/api-client";
 import { formatCOP, formatDate, type Balance, type Movement } from "@/lib/contracts";
-import { clearChargeKey, clearTransferKey } from "@/lib/financial-retry";
+import { clearChargeKey, clearGroupChargeKey, clearTransferKey } from "@/lib/financial-retry";
 
 export default function Dashboard() {
   const router = useRouter();
@@ -24,6 +25,7 @@ export default function Dashboard() {
     await api.post("/auth/logout").catch(() => {});
     clearTransferKey();
     clearChargeKey();
+    clearGroupChargeKey();
     queryClient.clear();
     router.replace("/login");
   }, [queryClient, router]);
@@ -54,6 +56,7 @@ export default function Dashboard() {
       <div className="mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="text-sm font-semibold text-[#468d70]">TU ESPACIO FINANCIERO</p>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight sm:text-4xl">Todo en un solo lugar.</h1><p className="mt-2 text-[#66796e]">Mueve tu dinero con tranquilidad.</p></div>
         <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
+          <Link href="/charges" className="btn-subtle w-full sm:w-auto"><HandCoins size={18} /> Mis cobros</Link>
           <button type="button" className="btn-subtle w-full sm:w-auto" onClick={() => setChargeOpen(true)}><HandCoins size={18} /> Solicitar cobro</button>
           <button type="button" className="btn-primary w-full sm:w-auto" onClick={() => setTransferOpen(true)}><Send size={18} /> Enviar dinero <ArrowRight size={18} /></button>
         </div></div>

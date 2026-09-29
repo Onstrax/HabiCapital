@@ -23,11 +23,18 @@ from app.modules.payment_requests.use_cases.charges import (
     InsufficientChargePayment, cancel_charge, create_charge_request,
     process_charge_payment, reject_charge,
 )
+from app.modules.payment_requests.adapters.schemas import (
+    CreateGroupPaymentRequestSchema, CreatedPaymentRequestResponseSchema,
+    CreatedPaymentRequestsSchema, GroupPaymentRequestResponseSchema,
+)
+from app.modules.payment_requests.use_cases.create_group_charge import (
+    GroupChargeError, RequestedRecipient, create_group_charge,
+)
 from app.shared.exceptions import (
     BalanceLimitExceededException, ChargeForbiddenException,
     ChargeNotFoundException, ChargeStateConflictException,
 )
-from app.shared.utils.security_utils import sanitize_alias
+from app.shared.utils.security_utils import mask_full_name, sanitize_alias
 
 router = APIRouter(prefix="/api/v1/charges", dependencies=[Depends(bearer_auth)])
 
@@ -74,10 +81,8 @@ def charge_error(exc: Exception) -> JSONResponse:
     return api_error(400, "BALANCE_LIMIT_EXCEEDED", "El saldo receptor excedería el límite")
 
 
-@router.get("", response_model=ChargesResponse)
-@read_limit
-async def list_charges(request: Request, status: PaymentRequestStatus = Query(PaymentRequestStatus.PENDING),
-                       session: AsyncSession = Depends(get_db)):
+async def _received_charges(request: Request, status: PaymentRequestStatus,
+                            session: AsyncSession):
     payer_id = await current_user_id(request)
     if isinstance(payer_id, JSONResponse):
         return payer_id
@@ -103,6 +108,82 @@ async def list_charges(request: Request, status: PaymentRequestStatus = Query(Pa
         amount=charge.amount, concept=charge.concept, status=charge.status.value,
         created_at=charge.created_at,
     ) for charge, requester_alias, payer_alias in rows])
+
+
+@router.get("", response_model=ChargesResponse)
+@read_limit
+async def list_charges(request: Request, status: PaymentRequestStatus = Query(PaymentRequestStatus.PENDING),
+                       session: AsyncSession = Depends(get_db)):
+    return await _received_charges(request, status, session)
+
+
+@router.get("/pending", response_model=ChargesResponse)
+@read_limit
+async def list_pending_charges(request: Request, session: AsyncSession = Depends(get_db)):
+    return await _received_charges(request, PaymentRequestStatus.PENDING, session)
+
+
+def created_item(charge: PaymentRequestModel, payer: UserModel) -> CreatedPaymentRequestResponseSchema:
+    return CreatedPaymentRequestResponseSchema(
+        id=charge.id, group_id=charge.group_id, payer_alias=payer.alias,
+        masked_name=mask_full_name(payer.full_name), amount=charge.amount,
+        percentage=float(charge.percentage) if charge.percentage is not None else None,
+        concept=charge.concept, status=charge.status.value,
+        created_at=charge.created_at, updated_at=charge.updated_at,
+    )
+
+
+@router.get("/created", response_model=CreatedPaymentRequestsSchema)
+@read_limit
+async def list_created_charges(request: Request, limit: int = Query(50, ge=1, le=100),
+                               offset: int = Query(0, ge=0),
+                               session: AsyncSession = Depends(get_db)):
+    creator_id = await current_user_id(request)
+    if isinstance(creator_id, JSONResponse):
+        return creator_id
+    actor = await session.get(UserModel, creator_id)
+    if actor is None or not actor.is_active or actor.role != UserRole.USER:
+        return api_error(403, "FORBIDDEN", "Esta vista es exclusiva para usuarios activos")
+    requester_account, payer_account = aliased(AccountModel), aliased(AccountModel)
+    payer = aliased(UserModel)
+    rows = (await session.execute(
+        select(PaymentRequestModel, payer)
+        .join(requester_account, requester_account.id == PaymentRequestModel.requester_account_id)
+        .join(payer_account, payer_account.id == PaymentRequestModel.payer_account_id)
+        .join(payer, payer.id == payer_account.user_id)
+        .where(requester_account.user_id == creator_id, requester_account.type == AccountType.USER_WALLET)
+        .order_by(PaymentRequestModel.created_at.desc(), PaymentRequestModel.id.desc())
+        .offset(offset).limit(limit + 1)
+    )).all()
+    return CreatedPaymentRequestsSchema(
+        items=[created_item(charge, user) for charge, user in rows[:limit]],
+        next_offset=offset + limit if len(rows) > limit else None,
+    )
+
+
+@router.post("/group", response_model=GroupPaymentRequestResponseSchema, status_code=201,
+             dependencies=[Depends(financial_key_header)])
+@limiter.limit("15/minute", key_func=lookup_rate_key)
+async def create_group(request: Request, payload: CreateGroupPaymentRequestSchema,
+                       session: AsyncSession = Depends(get_db)):
+    creator_id = await current_user_id(request)
+    if isinstance(creator_id, JSONResponse):
+        return creator_id
+    try:
+        async with session.begin():
+            group_id, rows = await create_group_charge(
+                session, creator_id, payload.total_amount, payload.concept,
+                [RequestedRecipient(row.recipient_alias, row.percentage, row.is_locked)
+                 for row in payload.recipients],
+            )
+            response = GroupPaymentRequestResponseSchema(
+                group_id=group_id, total_amount=payload.total_amount,
+                items=[created_item(charge, payer) for charge, payer in rows],
+            )
+    except GroupChargeError as exc:
+        status = 401 if exc.code == "UNAUTHORIZED" else 404 if exc.code in {"PAYER_NOT_FOUND", "ACCOUNT_NOT_FOUND"} else 422
+        return api_error(status, exc.code, str(exc))
+    return response
 
 
 @router.post("", response_model=ChargeResponse, status_code=201)

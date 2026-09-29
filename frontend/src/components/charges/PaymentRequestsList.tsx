@@ -9,7 +9,7 @@ import { formatCOP, formatDate, type Charge } from "@/lib/contracts";
 export function PaymentRequestsList() {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState("");
-  const charges = useQuery({ queryKey: ["charges", "pending"], queryFn: () => api.get<{ items: Charge[] }>("/charges?status=PENDING"), refetchInterval: 30_000 });
+  const charges = useQuery({ queryKey: ["charges", "pending"], queryFn: () => api.get<{ items: Charge[] }>("/charges/pending"), refetchInterval: 30_000 });
   const action = useMutation({
     mutationFn: ({ id, action }: { id: string; action: "pay" | "reject" }) => api.post(`/charges/${encodeURIComponent(id)}/${action}`),
     onSuccess: () => {

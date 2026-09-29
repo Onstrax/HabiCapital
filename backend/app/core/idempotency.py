@@ -20,7 +20,7 @@ from app.modules.ledger.infrastructure.models import IdempotencyRecordModel, Ide
 
 MUTATIVE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 PUBLIC_PATHS = {"/api/v1/auth/login", "/api/v1/auth/register"}
-FINANCIAL_PATHS = {"/api/v1/admin/topup", "/api/v1/transfers/execute"}
+FINANCIAL_PATHS = {"/api/v1/admin/topup", "/api/v1/transfers/execute", "/api/v1/charges/group"}
 
 
 def error(code: str, message: str, status_code: int) -> JSONResponse:

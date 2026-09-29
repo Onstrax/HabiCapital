@@ -10,6 +10,11 @@ export interface Charge {
   amount: number; concept: string; status: "PENDING" | "COMPLETED" | "REJECTED" | "CANCELLED";
   created_at: string;
 }
+export interface CreatedCharge {
+  id: string; group_id: string | null; payer_alias: string; masked_name: string;
+  amount: number; percentage: number | null; concept: string;
+  status: Charge["status"]; created_at: string; updated_at: string;
+}
 export interface Recipient { recipient_id: string; recipient_alias: string; masked_name: string }
 
 export const formatCOP = (amount: number) => new Intl.NumberFormat("es-CO", {

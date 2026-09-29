@@ -1,5 +1,6 @@
 const retryKey = "habicapital_pending_transfer";
 const chargeRetryKey = "habicapital_pending_charge";
+const groupRetryKey = "habicapital_pending_group_charge";
 
 async function stableKey(storageKey: string, payload: object): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(payload));
@@ -27,4 +28,12 @@ export function stableChargeKey(payload: { payer_alias: string; amount: number; 
 
 export function clearChargeKey() {
   sessionStorage.removeItem(chargeRetryKey);
+}
+
+export function stableGroupChargeKey(payload: object): Promise<string> {
+  return stableKey(groupRetryKey, payload);
+}
+
+export function clearGroupChargeKey() {
+  sessionStorage.removeItem(groupRetryKey);
 }
