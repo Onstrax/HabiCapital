@@ -6,6 +6,7 @@ import { ArrowLeft, LogOut, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { api, ApiError } from "@/lib/api-client";
 import { Brand } from "@/components/Brand";
+import { AuditLogList } from "@/components/admin/AuditLogList";
 import { formatCOP } from "@/lib/contracts";
 
 interface TopupResult {
@@ -100,6 +101,7 @@ export default function AdminPage() {
           <button type="submit" disabled={busy} className="btn-primary w-full">{busy ? "Procesando..." : "Confirmar recarga"}</button>
         </form>
       </section>
+      <AuditLogList />
     </main>
   </div>;
 }

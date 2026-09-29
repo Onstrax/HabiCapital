@@ -10,3 +10,5 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return <html lang="es"><body><Providers>{children}</Providers></body></html>;
 }
+// A per-response CSP nonce requires the HTML and hydration scripts to be rendered together.
+export const dynamic = "force-dynamic";

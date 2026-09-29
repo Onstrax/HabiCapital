@@ -30,6 +30,7 @@ def lookup_rate_key(request: Request) -> str:
 
 
 limiter = Limiter(key_func=get_remote_address)
+read_limit = limiter.shared_limit("60/minute", scope="authenticated_reads", key_func=lookup_rate_key)
 router = APIRouter(prefix="/api/v1")
 
 
@@ -127,6 +128,7 @@ async def login(request: Request, payload: LoginRequest, repo: IdentityRepositor
 
 @router.get("/auth/me", response_model=SessionResponse,
             dependencies=[Depends(bearer_auth)])
+@read_limit
 async def get_current_session(request: Request,
                               repo: IdentityRepository = Depends(get_identity_repository)):
     user_id = await current_user_id(request)

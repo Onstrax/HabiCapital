@@ -14,7 +14,7 @@ from app.core.database import get_db
 from app.core.field_encryption import blind_index
 from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
-    StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
+    StrictSchema, api_error, current_user_id, limiter, lookup_rate_key, read_limit,
 )
 from app.modules.ledger.domain.services import calculate_account_balance
 from app.modules.ledger.infrastructure.models import (
@@ -131,6 +131,7 @@ async def execute_transfer(request: Request, payload: TransferRequest,
 
 
 @router.get("/ledger/balance", response_model=BalanceResponse)
+@read_limit
 async def get_balance(request: Request, session: AsyncSession = Depends(get_db)):
     user_id = await current_user_id(request)
     if isinstance(user_id, JSONResponse):
@@ -148,6 +149,7 @@ async def get_balance(request: Request, session: AsyncSession = Depends(get_db))
 
 
 @router.get("/ledger/movements", response_model=MovementsResponse)
+@read_limit
 async def get_movements(request: Request, session: AsyncSession = Depends(get_db)):
     user_id = await current_user_id(request)
     if isinstance(user_id, JSONResponse):

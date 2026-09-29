@@ -14,7 +14,7 @@ from app.core.database import get_db
 from app.core.field_encryption import blind_index
 from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
-    StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
+    StrictSchema, api_error, current_user_id, limiter, lookup_rate_key, read_limit,
 )
 from app.modules.ledger.infrastructure.models import (
     AccountModel, AccountType, PaymentRequestModel, PaymentRequestStatus, UserModel, UserRole,
@@ -75,6 +75,7 @@ def charge_error(exc: Exception) -> JSONResponse:
 
 
 @router.get("", response_model=ChargesResponse)
+@read_limit
 async def list_charges(request: Request, status: PaymentRequestStatus = Query(PaymentRequestStatus.PENDING),
                        session: AsyncSession = Depends(get_db)):
     payer_id = await current_user_id(request)

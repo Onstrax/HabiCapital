@@ -7,6 +7,7 @@ from slowapi.errors import RateLimitExceeded
 from datetime import datetime, timezone
 
 from app.core.idempotency import IdempotencyMiddleware
+from app.modules.audit.adapters.controllers import router as audit_router
 from app.modules.identity.adapters.controllers import limiter, router
 from app.modules.ledger.adapters.controllers import router as ledger_router
 from app.modules.payment_requests.adapters.controllers import router as charges_router
@@ -39,3 +40,4 @@ app.add_middleware(IdempotencyMiddleware)
 app.include_router(router)
 app.include_router(ledger_router)
 app.include_router(charges_router)
+app.include_router(audit_router)
