@@ -68,16 +68,12 @@ Dividí la transferencia P2P en dos interacciones API:
 
 * **Por qué:** Elimina transferencias erróneas por tipografía y da confirmación explícita al emisor antes de mover dinero real.
 
-  
-
-Aquí tienes una versión reescrita con un enfoque de producto, centrada en el impacto en la vida real de los usuarios, sus interacciones sociales y el motivo de negocio tras la decisión:
 
   
 
 ### D. Killer Feature: Sistema de Cobros Informales (Payment Requests)
 
 #### **El Problema en la Vida Real**
-
 En las relaciones cotidianas —dividirse la cuenta de una cena, saldar los servicios entre roommates o cobrar un trabajo informal— mover plata no es solo un problema técnico, es una interacción social. Casi siempre ocurre lo mismo: quien adelantó el dinero siente la "pena" o incomodidad de estar recordando la deuda, mientras que quienes deben pagar rara vez lo hacen por mala fe; simplemente lo olvidan entre las ocupaciones del día a día o no tienen saldo en ese instante exacto.
 #### **Por qué se escogió esta Feature**
 
@@ -125,7 +121,7 @@ La combinación de **SDD + TDD** establece un ciclo de retroalimentación cerrad
 #### 1. Rigor Financiero e Invariantes de Seguridad (La Columna Vertebral)
 Dado el contexto bancario y el cumplimiento estricto de la *Regla Suprema* (*"el sistema no puede perder un peso"*), la seguridad y la consistencia no son características opcionales ni capas añadidas a posteriori:
 * **Integridad Transaccional ACID Estricta:** Bloqueos pesimistas a nivel de fila (`SELECT ... FOR UPDATE`), ordenamiento de UUIDs anti-deadlocks y Libro Mayor de partida doble (*Double-Entry Ledger*) garantizan que ninguna operación altere el balance sin una contrapartida exacta.
-* **Arquitectura Resiliente a Filtraciones (*Zero-Leakage*):** Cifrado a nivel de campo (*Field-Level Encryption* con AES-256-GCM), *Blind Indexing* con HMAC-SHA256 para búsquedas sin texto plano y contraseñas procesadas con Argon2id. Si la base de datos sufriera un volcado no autorizado (*data breach*), la información personal (PII) permanece matemáticamente ininteligible.
+* **Arquitectura Resiliente a Filtraciones:** Cifrado a nivel de campo (*Field-Level Encryption* con AES-256-GCM), *Blind Indexing* con HMAC-SHA256 para búsquedas sin texto plano y contraseñas procesadas con Argon2id. Si la base de datos sufriera un volcado no autorizado (*data breach*), la información personal (PII) permanece matemáticamente ininteligible.
 * **Auditoría Inmutable y No Repudio:** Registro persistente de eventos (`audit_logs`) que almacena hashes de payloads, direcciones IP y marcas de tiempo para garantizar la trazabilidad de cada intento operado en el sistema.
 
 #### 2. Experiencia de Usuario (User-Centric &amp; UX Empática)
@@ -133,7 +129,7 @@ Inspirado en las interacciones cotidianas de las finanzas personales e informale
 
 * **P2P Sin Exposición de Datos Sensibles:** El uso de **Aliases únicos** cortos y fáciles de memorizar (`@alias`), combinado con la **búsqueda exacta y confirmación en 2 pasos con *Name Masking*** (`"¿Confirmas enviar $50.000 a J*** E******* G****?"`), le otorga al usuario certeza absoluta antes de mover su dinero, sin forzarlo a compartir números de cédula, correos o datos bancarios pesados.
 * **Gestión Empática y No Destructiva de Errores:** En la *Killer Feature* de cobros (*Payment Requests*), si un usuario intenta responder un cobro pero no cuenta con fondos suficientes, el sistema aborta de forma segura la transacción financiera pero **mantiene el cobro en estado `PENDING`**, presentando un mensaje claro y no punitivo (*"Saldo insuficiente (\$X COP faltantes). Tu cobro sigue pendiente para cuando recargues saldo"*). Esto elimina la fricción social de tener que re-generar o solicitar un nuevo cobro.
-* **Soberanía sobre los Datos (Crypto-Shredding):** Se respeta la privacidad del usuario integrando patrones de borrado seguro (*Crypto-Shredding*), los cuales permiten anonimizar de forma irreversible los datos personales manteniendo intacta la consistencia contable del Libro Mayor exigida por las regulaciones financieras.
+
 
 
 ---
@@ -268,8 +264,9 @@ El middleware intercepta peticiones mutativas (`POST`), valida el UUIDv4 de la c
 
 - **Conectividad Eventual (Offline-First & Eventual Consistency en el Cliente):** Diseñaría mecanismos de sincronización para entornos de red inestables o intermitentes.
 - **Multithreading y Microoptimizaciones de Rendimiento en Backend:** Maximizar el rendimiento del servidor bajo ráfagas intensas de tráfico aislamientos y delegaciones.
-
-  
+6. **Autofill para contactos y trasnferencias recurrente:** Buscando reducir la fricción al máximo y mejorar la experiencia del usuario
+7. **Mejorar los mensajes de error:** Si bien los errores que se muestran no son output de consola sino español amigable, no son mensajes demasiado útiles que indiquen qu+e salió mal exactamete o como lidiar con ello. Así que podnría mensajes menos genéricos para que sean más útiles
+8. **Crypto-Shredding:** La soberanía del usuario sobre sus datos es escencial. El sistea actual respeta bien muchos de estos principios, sin embargo actualmente no cuenta con un mecanismo para borrar la cuenta deñ usuario junto con sus datos (sin pereder la auditabilidad histórica).
 
 ---
 
@@ -367,72 +364,6 @@ El middleware intercepta peticiones mutativas (`POST`), valida el UUIDv4 de la c
 * **Lo que me llevo:** En sistemas financieros, la usabilidad y las pantallas se pueden pulir e iterar, pero **la integridad contable es binaria**: o el sistema es 100% consistente o no sirve. La confianza del usuario reposa en la certeza de que el sistema jamás perderá un peso.
   Incluso un reto sencillo de un sistema con 6 funcionalidades básicas y comunes, demuestra tener una enorme profundidad cuando se desea llevar a altos estándares de calidad y seguridad.
 
-
----
-
-  
-
-## 🛠️ Guía de Instalación y Ejecución Local
-
-  
-
-```bash
-
-# 1. Clonar el repositorio
-
-git clone https://github.com/usuario/habicapital-p2p.git
-
-cd habicapital-p2p
-
-  
-
-# 2. Configurar entorno backend
-
-cd backend
-
-python -m venv venv
-
-source venv/bin/activate # En Windows: venv\Scripts\activate
-
-pip install -r requirements.txt
-
-  
-
-# 3. Configurar variables de entorno
-
-cp .env.example .env
-
-  
-
-# 4. Ejecutar migraciones DDL con Alembic
-
-alembic upgrade head
-
-  
-
-# 5. Ejecutar Suite TDD con Pytest (Verificación de Concurrencia y Partida Doble)
-
-pytest tests/ --cov=app --cov-report=term-missing
-
-  
-
-# 6. Iniciar servidor Backend FastAPI
-
-uvicorn app.main:app --reload --port 8000
-
-  
-
-# 7. En otra terminal, iniciar Frontend Next.js
-
-cd ../frontend
-
-npm install
-
-npm run dev
-
-```
-
-  
 
 ---
 
