@@ -76,6 +76,20 @@ existen. `POST /api/v1/admin/topup` exige JWT de un `ADMIN` activo y llave
 `X-Idempotency-Key` UUIDv4; recibe `target_user_alias`, `amount` entero en COP y
 `concept`. El saldo nuevo se calcula con el libro mayor.
 
+Si olvidaste la contraseña del administrador, vuelve a construir/iniciar la API
+y ejecuta el asistente interactivo. Solicita la nueva contraseña dos veces sin
+mostrarla, actualiza únicamente el hash Argon2id del administrador configurado
+en `ADMIN_EMAIL` y registra el cambio en auditoría:
+
+```bash
+docker compose up -d --build api
+docker compose exec -it api python -m app.core.admin_password_reset
+```
+
+El restablecimiento no cambia el libro mayor, el rol ni la cuenta ómnibus. La
+contraseña nueva queda guardada en la base de datos; volver a ejecutar el
+bootstrap no la modifica.
+
 El cobro se crea en `POST /api/v1/charges` usando `payer_alias`, `amount` y
 `concept`. El pagador puede usar `POST /api/v1/charges/{charge_id}/pay` (requiere
 llave idempotente) o `/reject`; el solicitante puede usar `/cancel`. Las acciones
