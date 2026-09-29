@@ -18,3 +18,5 @@ Abre http://localhost:3000/register. `BACKEND_URL` solo se lee en el servidor Ne
 Los usuarios recién registrados comienzan sin saldo; el administrador puede abonarlo mediante `POST /api/v1/admin/topup`.
 
 Comprobaciones: `npm test`, `npm run typecheck` y `npm run build`. Los movimientos y cobros se consultan con `/api/v1/ledger/movements` y `GET /api/v1/charges?status=PENDING`; ambos requieren JWT. El saldo se actualiza cada 15 segundos.
+
+Desde el dashboard, **Solicitar cobro** envía una solicitud al alias indicado; el pagador la verá en **Cobros pendientes** y podrá pagarla o rechazarla. El historial y los cobros pendientes tienen desplazamiento interno con altura máxima de 26 rem. Cada consulta devuelve como máximo 50 registros recientes; acceder a registros anteriores requiere paginación en la API.

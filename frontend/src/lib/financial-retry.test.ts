@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearTransferKey, stableTransferKey } from "./financial-retry";
+import { clearChargeKey, clearTransferKey, stableChargeKey, stableTransferKey } from "./financial-retry";
 
 const values = new Map<string, string>();
 beforeEach(() => {
@@ -20,5 +20,14 @@ describe("financial retry keys", () => {
     expect(second).not.toBe(first);
     clearTransferKey();
     expect(await stableTransferKey(payment)).not.toBe(first);
+  });
+  it("keeps a pending charge key independent of transfer attempts", async () => {
+    const charge = { payer_alias: "carlos_dev", amount: 50000, concept: "Cena" };
+    const first = await stableChargeKey(charge);
+    expect(await stableChargeKey(charge)).toBe(first);
+    await stableTransferKey({ recipient_id: "abc", amount: 50000, concept: "Cena" });
+    expect(await stableChargeKey(charge)).toBe(first);
+    clearChargeKey();
+    expect(await stableChargeKey(charge)).not.toBe(first);
   });
 });

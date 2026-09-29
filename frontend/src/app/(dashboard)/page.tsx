@@ -1,26 +1,29 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDownLeft, ArrowRight, ArrowUpRight, Clock3, LogOut, RefreshCw, Send, ShieldCheck, Wallet } from "lucide-react";
+import { ArrowDownLeft, ArrowRight, ArrowUpRight, Clock3, HandCoins, LogOut, RefreshCw, Send, ShieldCheck, Wallet } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Brand } from "@/components/Brand";
 import { PaymentRequestsList } from "@/components/charges/PaymentRequestsList";
+import { CreateChargeModal } from "@/components/charges/CreateChargeModal";
 import { TransferModal } from "@/components/transfer/TransferModal";
 import { api, getAccessToken, setAccessToken } from "@/lib/api-client";
 import { formatCOP, formatDate, type Balance, type Movement } from "@/lib/contracts";
-import { clearTransferKey } from "@/lib/financial-retry";
+import { clearChargeKey, clearTransferKey } from "@/lib/financial-retry";
 
 export default function Dashboard() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const [ready, setReady] = useState(false);
   const [transferOpen, setTransferOpen] = useState(false);
+  const [chargeOpen, setChargeOpen] = useState(false);
   const [waking, setWaking] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const signOut = useCallback(() => {
     setAccessToken(null);
     clearTransferKey();
+    clearChargeKey();
     queryClient.clear();
     router.replace("/login");
   }, [queryClient, router]);
@@ -47,7 +50,10 @@ export default function Dashboard() {
     <main className="mx-auto max-w-6xl px-5 pb-24 pt-9 sm:px-8 sm:pt-12 lg:px-10">
       <div className="mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end"><div><p className="text-sm font-semibold text-[#468d70]">TU ESPACIO FINANCIERO</p>
         <h1 className="mt-1 text-3xl font-semibold tracking-tight sm:text-4xl">Todo en un solo lugar.</h1><p className="mt-2 text-[#66796e]">Mueve tu dinero con tranquilidad.</p></div>
-        <button type="button" className="btn-primary w-full sm:w-auto" onClick={() => setTransferOpen(true)}><Send size={18} /> Enviar dinero <ArrowRight size={18} /></button></div>
+        <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row">
+          <button type="button" className="btn-subtle w-full sm:w-auto" onClick={() => setChargeOpen(true)}><HandCoins size={18} /> Solicitar cobro</button>
+          <button type="button" className="btn-primary w-full sm:w-auto" onClick={() => setTransferOpen(true)}><Send size={18} /> Enviar dinero <ArrowRight size={18} /></button>
+        </div></div>
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(300px,1fr)]">
         <section aria-labelledby="balance-heading" className="relative overflow-hidden rounded-[28px] bg-forest p-6 text-white shadow-card sm:p-8">
           <div className="pointer-events-none absolute -right-12 -top-24 size-64 rounded-full border-[45px] border-[#6ba27f]/20" />
@@ -72,7 +78,7 @@ export default function Dashboard() {
           {movements.isError && <p role="alert" className="text-sm text-red-700">No pudimos cargar el historial. <button onClick={() => void movements.refetch()} className="font-semibold underline">Reintentar</button></p>}
           {movements.data?.items.length === 0 && <div className="rounded-2xl bg-cream px-6 py-10 text-center"><Clock3 className="mx-auto mb-3 text-[#669b7f]" />
             <p className="font-medium">Aún no hay movimientos</p><p className="mt-1 text-sm text-[#728277]">Tus transferencias aparecerán aquí.</p></div>}
-          <ul className="divide-y divide-[#e9eee7]">{movements.data?.items.map((item) => <li key={item.reference_id} className="flex items-center gap-3 py-4 first:pt-0">
+          <ul className="max-h-[26rem] divide-y divide-[#e9eee7] overflow-y-auto overscroll-contain pr-2" tabIndex={movements.data?.items.length ? 0 : -1} aria-label="Historial de movimientos recientes">{movements.data?.items.map((item) => <li key={item.reference_id} className="flex items-center gap-3 py-4 first:pt-0">
             <div className={`flex size-11 shrink-0 items-center justify-center rounded-2xl ${item.direction === "IN" ? "bg-mint text-forest" : "bg-[#f7ede2] text-[#a77845]"}`}>
               {item.direction === "IN" ? <ArrowDownLeft size={20} /> : <ArrowUpRight size={20} />}</div>
             <div className="min-w-0 flex-1"><p className="truncate font-semibold">{item.concept}</p><p className="mt-0.5 truncate text-xs text-[#748579]">{item.direction === "IN" ? "De" : "A"} @{item.counterparty_alias} · {formatDate(item.created_at)}</p></div>
@@ -82,5 +88,6 @@ export default function Dashboard() {
       </div>
     </main>
     {transferOpen && <TransferModal onClose={() => setTransferOpen(false)} />}
+    {chargeOpen && <CreateChargeModal onClose={() => setChargeOpen(false)} />}
   </div>;
 }

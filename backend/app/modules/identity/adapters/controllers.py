@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.openapi_security import bearer_auth
 from app.core.security import DUMMY_PASSWORD_HASH, create_access_token, decode_access_token, hash_password, verify_password
 from app.modules.identity.infrastructure.repository import SqlIdentityRepository
 from app.modules.identity.use_cases.identity import (
@@ -128,7 +129,8 @@ async def current_user_id(request: Request) -> uuid.UUID | JSONResponse:
     return uuid.UUID(claims["sub"])
 
 
-@router.post("/transfers/lookup", response_model=LookupResponse)
+@router.post("/transfers/lookup", response_model=LookupResponse,
+             dependencies=[Depends(bearer_auth)])
 @limiter.limit("10/minute", key_func=lookup_rate_key)
 async def lookup(request: Request, payload: LookupRequest,
                  repo: IdentityRepository = Depends(get_identity_repository)):

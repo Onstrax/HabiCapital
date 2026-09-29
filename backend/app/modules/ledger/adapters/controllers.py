@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
 )
@@ -26,7 +27,7 @@ from app.shared.exceptions import (
     OmnibusConfigurationException, SelfTransferForbiddenException,
 )
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(bearer_auth)])
 
 
 class TransferRequest(StrictSchema):
@@ -79,7 +80,8 @@ class TopupResponse(StrictSchema):
     timestamp: datetime
 
 
-@router.post("/transfers/execute", response_model=TransferResponse, status_code=201)
+@router.post("/transfers/execute", response_model=TransferResponse, status_code=201,
+             dependencies=[Depends(financial_key_header)])
 @limiter.limit("10/minute", key_func=lookup_rate_key)
 async def execute_transfer(request: Request, payload: TransferRequest,
                            session: AsyncSession = Depends(get_db)):
@@ -178,7 +180,8 @@ async def get_movements(request: Request, session: AsyncSession = Depends(get_db
     ) for entry, tx, debit_alias, credit_alias in rows])
 
 
-@router.post("/admin/topup", response_model=TopupResponse)
+@router.post("/admin/topup", response_model=TopupResponse,
+             dependencies=[Depends(financial_key_header)])
 async def admin_topup(request: Request, payload: TopupRequest,
                       session: AsyncSession = Depends(get_db)):
     admin_id = await current_user_id(request)

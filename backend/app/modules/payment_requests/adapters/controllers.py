@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
     StrictSchema, api_error, current_user_id, limiter, lookup_rate_key,
 )
@@ -27,7 +28,7 @@ from app.shared.exceptions import (
 )
 from app.shared.utils.security_utils import sanitize_alias
 
-router = APIRouter(prefix="/api/v1/charges")
+router = APIRouter(prefix="/api/v1/charges", dependencies=[Depends(bearer_auth)])
 
 
 class ChargeRequest(StrictSchema):
@@ -136,7 +137,8 @@ async def create_charge(request: Request, payload: ChargeRequest,
                               created_at=charge.created_at)
 
 
-@router.post("/{charge_id}/pay", response_model=PaidResponse)
+@router.post("/{charge_id}/pay", response_model=PaidResponse,
+             dependencies=[Depends(financial_key_header)])
 @limiter.limit("15/minute", key_func=lookup_rate_key)
 async def pay_charge(request: Request, charge_id: uuid.UUID,
                      session: AsyncSession = Depends(get_db)):

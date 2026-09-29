@@ -15,6 +15,12 @@ La API queda en `http://localhost:8000/docs`. Compose espera a PostgreSQL,
 ejecuta `alembic upgrade head` y luego inicia FastAPI. La contraseña local de
 PostgreSQL está en `docker-compose.yml`; úsala solo para desarrollo.
 
+Para probar rutas protegidas desde `/docs`, ejecuta `POST /api/v1/auth/login`,
+copia `access_token` de la respuesta y pulsa **Authorize** arriba a la derecha.
+Pega solo el token (sin `Bearer `); Swagger añade el encabezado en cada petición
+protegida. Las operaciones financieras muestran además el campo obligatorio
+`X-Idempotency-Key`: usa un UUIDv4 nuevo para cada operación distinta.
+
 Ejecuta las pruebas también desde la raíz:
 
 ```bash

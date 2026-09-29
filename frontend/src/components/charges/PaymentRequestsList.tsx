@@ -34,7 +34,7 @@ export function PaymentRequestsList() {
     {charges.isError && <p role="alert" className="text-sm text-red-700">No pudimos cargar tus cobros. <button onClick={() => void charges.refetch()} className="font-semibold underline">Reintentar</button></p>}
     {charges.data?.items.length === 0 && <div className="rounded-2xl bg-cream px-5 py-8 text-center"><ArrowDownLeft className="mx-auto mb-3 text-[#5c967a]" />
       <p className="font-medium">Estás al día con tus cobros</p><p className="mt-1 text-sm text-[#728277]">Aquí aparecerán cuando alguien te solicite un pago.</p></div>}
-    <div className="space-y-3">{charges.data?.items.map((charge) => <article key={charge.id} className="rounded-2xl border border-[#e7ece5] p-4">
+    <div className="max-h-[26rem] space-y-3 overflow-y-auto overscroll-contain pr-2" tabIndex={charges.data?.items.length ? 0 : -1} role="region" aria-label="Lista de cobros pendientes">{charges.data?.items.map((charge) => <article key={charge.id} className="rounded-2xl border border-[#e7ece5] p-4">
       <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-semibold">@{charge.requester_alias}</p><p className="mt-1 break-words text-sm text-[#718276]">{charge.concept}</p>
         <p className="mt-2 text-xs text-[#8a988d]">{formatDate(charge.created_at)}</p></div>
         <p className="shrink-0 font-bold text-forest">{formatCOP(charge.amount)}</p></div>
