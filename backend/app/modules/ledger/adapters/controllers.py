@@ -1,7 +1,7 @@
 """Authenticated HTTP endpoints for transfers and derived balances."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.modules.ledger.domain.gmf_calculator import calculate_gmf_tax
 from app.core.field_encryption import blind_index
 from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
@@ -25,7 +26,7 @@ from app.modules.ledger.use_cases.transfer_money import execute_p2p_transfer_tra
 from app.shared.utils.security_utils import sanitize_alias
 from app.shared.exceptions import (
     AccountNotFoundException, BalanceLimitExceededException, InsufficientFundsException,
-    OmnibusConfigurationException, SelfTransferForbiddenException,
+    OmnibusConfigurationException, SelfTransferForbiddenException, TaxAccountConfigurationException,
 )
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(bearer_auth)])
@@ -38,6 +39,8 @@ class TransferRequest(StrictSchema):
 
 
 class TransferResponse(StrictSchema):
+    gmf_tax: int
+    total_debit: int
     reference_id: str
     status: str
     amount: int
@@ -54,6 +57,8 @@ class BalanceResponse(StrictSchema):
 
 
 class MovementResponse(StrictSchema):
+    gmf_tax: int
+    total_debit: int
     reference_id: str
     type: str
     direction: str
@@ -115,14 +120,21 @@ async def execute_transfer(request: Request, payload: TransferRequest,
             )
             response = TransferResponse(
                 reference_id=tx.reference_id, status=tx.status.value,
-                amount=payload.amount, sender_alias=sender.alias,
+                amount=payload.amount, gmf_tax=calculate_gmf_tax(payload.amount),
+                total_debit=payload.amount + calculate_gmf_tax(payload.amount), sender_alias=sender.alias,
                 recipient_alias=recipient.alias, concept=tx.concept,
                 created_at=tx.created_at,
             )
-    except InsufficientFundsException:
-        return api_error(400, "INSUFFICIENT_FUNDS", "Saldo insuficiente para la transferencia")
-    except BalanceLimitExceededException:
-        return api_error(400, "BALANCE_LIMIT_EXCEEDED", "El saldo receptor excedería el límite")
+    except InsufficientFundsException as exc:
+        return JSONResponse(status_code=400, content={
+            "code": "INSUFFICIENT_FUNDS", "message": str(exc),
+            "details": {"current_balance": exc.current_balance, "required_amount": exc.required_amount,
+                        "gmf_tax": exc.gmf_tax, "shortfall": exc.shortfall},
+            "timestamp": datetime.now(timezone.utc).isoformat()})
+    except TaxAccountConfigurationException:
+        return api_error(503, "GMF_NOT_CONFIGURED", "Cuenta colectora GMF no configurada")
+    except BalanceLimitExceededException as exc:
+        return api_error(400, "BALANCE_LIMIT_EXCEEDED", str(exc))
     except SelfTransferForbiddenException:
         return api_error(400, "SELF_TRANSFER_FORBIDDEN", "No se permiten auto-transferencias")
     except AccountNotFoundException:
@@ -179,7 +191,8 @@ async def get_movements(request: Request, session: AsyncSession = Depends(get_db
     return MovementsResponse(items=[MovementResponse(
         reference_id=tx.reference_id, type=tx.type.value,
         direction="OUT" if entry.debit_account_id == account.id else "IN",
-        amount=entry.amount, concept=tx.concept,
+        amount=entry.amount, gmf_tax=(tx.gmf_tax or 0) if entry.debit_account_id == account.id else 0,
+        total_debit=entry.amount + ((tx.gmf_tax or 0) if entry.debit_account_id == account.id else 0), concept=tx.concept,
         counterparty_alias=credit_alias if entry.debit_account_id == account.id else debit_alias,
         created_at=entry.created_at,
     ) for entry, tx, debit_alias, credit_alias in rows])

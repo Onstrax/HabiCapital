@@ -7,12 +7,12 @@ import uuid
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text
+from sqlalchemy import insert, func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core import idempotency
-from app.core.config import get_settings
+from app.core.config import get_settings, DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID
 from app.core.database import get_db
 from app.core.security import create_access_token
 from app.core import bootstrap_admin as bootstrap_module
@@ -45,6 +45,9 @@ async def payments_db(monkeypatch):
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(insert(AccountModel).values(
+                id=DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID, user_id=None,
+                account_number="SYSTEM-TAX-GMF", type="SYSTEM_TAX_GMF"))
         sessions = async_sessionmaker(engine, expire_on_commit=False)
 
         async def override_db():
@@ -56,6 +59,7 @@ async def payments_db(monkeypatch):
         monkeypatch.setenv("DATABASE_URL", url)
         monkeypatch.setenv("JWT_SECRET_KEY", "t" * 64)
         monkeypatch.setenv("ADMIN_PASSWORD", "test-password-123")
+        monkeypatch.setenv("SYSTEM_TAX_GMF_ACCOUNT_ID", str(DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID))
         get_settings.cache_clear()
         yield sessions
     finally:
@@ -170,11 +174,11 @@ async def test_admin_topup_and_successful_charge_payment(payments_db):
     assert paid.json()["status"] == "COMPLETED" and paid.json() == replay_paid.json()
     assert terminal.status_code == 409
     async with payments_db() as session:
-        assert await calculate_account_balance(payer_acc.id, session) == 5000
+        assert await calculate_account_balance(payer_acc.id, session) == 4900
         assert await calculate_account_balance(requester_acc.id, session) == 25000
         assert await calculate_account_balance(omnibus.id, session) == -30000
         assert (await session.get(PaymentRequestModel, uuid.UUID(charge_id))).status == PaymentRequestStatus.COMPLETED
-        assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 2
+        assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 3
         assert await session.scalar(select(func.count()).select_from(TransactionModel).where(
             TransactionModel.type == TransactionType.PAYMENT_REQUEST_PAYMENT)) == 1
 
@@ -192,7 +196,7 @@ async def test_insufficient_funds_keeps_charge_pending_and_audits_failure(paymen
     assert charge.status_code == 201 and denied.status_code == 403
     assert response.status_code == 400
     assert response.json()["code"] == "INSUFFICIENT_FUNDS_FOR_PAYMENT_REQUEST"
-    assert response.json()["details"] == {"current_balance": 0, "required_amount": 25000,
+    assert response.json()["details"] == {"current_balance": 0, "required_amount": 25100, "gmf_tax": 100, "shortfall": 25100,
                                            "charge_status": "PENDING"}
     async with payments_db() as session:
         assert (await session.get(PaymentRequestModel, uuid.UUID(charge_id))).status == PaymentRequestStatus.PENDING
@@ -224,11 +228,11 @@ async def test_reject_cancel_authorization_and_terminal_states(payments_db):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_payment_creates_exactly_one_ledger_entry(payments_db):
+async def test_concurrent_payment_creates_exactly_one_payment_with_two_entries(payments_db):
     requester, payer, admin, _, payer_acc, _ = await seed(payments_db)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
-                          json={"target_user_alias": "payer", "amount": 50000, "concept": "Recarga"})
+                          json={"target_user_alias": "payer", "amount": 50200, "concept": "Recarga"})
         charge_id = (await client.post("/api/v1/charges", headers=auth(requester),
                                        json={"payer_alias": "payer", "amount": 50000,
                                              "concept": "Simultáneo"})).json()["id"]
@@ -239,7 +243,7 @@ async def test_concurrent_payment_creates_exactly_one_ledger_entry(payments_db):
     assert sorted(response.status_code for response in responses) == [200, 409]
     async with payments_db() as session:
         assert await calculate_account_balance(payer_acc.id, session) == 0
-        assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 2
+        assert await session.scalar(select(func.count()).select_from(LedgerEntryModel)) == 3
 
 
 @pytest.mark.asyncio
@@ -311,7 +315,7 @@ async def test_charge_rejects_payment_that_would_overflow_receiver_balance(payme
                                      credit_account_id=requester_acc.id, amount=2**63 - 1))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         await client.post("/api/v1/admin/topup", headers=auth(admin, key=True),
-                          json={"target_user_alias": "payer", "amount": 1, "concept": "Test"})
+                          json={"target_user_alias": "payer", "amount": 2, "concept": "Test"})
         charge = await client.post("/api/v1/charges", headers=auth(requester),
                                    json={"payer_alias": "payer", "amount": 1, "concept": "Overflow"})
         result = await client.post(f"/api/v1/charges/{charge.json()['id']}/pay",

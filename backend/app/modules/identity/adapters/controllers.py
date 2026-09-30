@@ -13,6 +13,8 @@ from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.ledger.adapters.schemas import TransferLookupResponse as LookupResponse
+from app.modules.ledger.domain.gmf_calculator import calculate_gmf_tax
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.openapi_security import bearer_auth
@@ -78,6 +80,7 @@ class SessionResponse(StrictSchema):
 
 class LookupRequest(StrictSchema):
     recipient_alias: str
+    amount: int | None = Field(default=None, ge=0, le=2**63 - 1)
 
     @field_validator("recipient_alias")
     @classmethod
@@ -85,10 +88,6 @@ class LookupRequest(StrictSchema):
         return sanitize_alias(value)
 
 
-class LookupResponse(StrictSchema):
-    recipient_id: uuid.UUID
-    recipient_alias: str
-    masked_name: str
 
 
 def get_identity_repository(session: AsyncSession = Depends(get_db)) -> IdentityRepository:
@@ -166,5 +165,9 @@ async def lookup(request: Request, payload: LookupRequest,
     if not found:
         return api_error(404, "RECIPIENT_NOT_FOUND", "El alias no corresponde a un usuario activo")
     user, masked_name = found
-    return LookupResponse(recipient_id=user.id, recipient_alias=user.alias,
-                          masked_name=masked_name)
+    tax = calculate_gmf_tax(payload.amount) if payload.amount is not None else None
+    total = payload.amount + tax if tax is not None else None
+    if total is not None and total > 2**63 - 1:
+        return api_error(422, "VALIDATION_ERROR", "El monto más GMF excede BIGINT")
+    return LookupResponse(recipient_id=user.id, recipient_alias=user.alias, alias=user.alias,
+                          masked_name=masked_name, amount=payload.amount, gmf_tax=tax, total_debit=total)

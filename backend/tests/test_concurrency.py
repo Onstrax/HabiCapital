@@ -1,4 +1,4 @@
-"""A sender can spend a 50,000 COP balance exactly once under simultaneous load."""
+"""A sender funded with 50,200 COP can send 50,000 + 200 GMF exactly once."""
 
 import asyncio
 import uuid
@@ -37,7 +37,7 @@ async def test_concurrent_transfers_prevent_overdraft(async_client, db_session, 
     await db_session.flush()
     db_session.add(LedgerEntryModel(transaction_id=funding.id,
                                     debit_account_id=omnibus.id,
-                                    credit_account_id=account_a.id, amount=50000))
+                                    credit_account_id=account_a.id, amount=50200))
     await db_session.commit()  # Make the seed visible to every independent request.
 
     token = create_access_token({"sub": str(user_a.id), "email": user_a.email,
@@ -59,6 +59,6 @@ async def test_concurrent_transfers_prevent_overdraft(async_client, db_session, 
     async with sessions() as verify:
         assert await calculate_account_balance(account_a.id, verify) == 0
         assert await calculate_account_balance(account_b.id, verify) == 50000
-        assert await verify.scalar(select(func.count()).select_from(LedgerEntryModel)) == 2
+        assert await verify.scalar(select(func.count()).select_from(LedgerEntryModel)) == 3
         assert await verify.scalar(select(func.count()).select_from(TransactionModel).where(
             TransactionModel.type == TransactionType.P2P_TRANSFER)) == 1

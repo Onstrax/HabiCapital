@@ -136,9 +136,9 @@ async def test_charge_controller_creates_pending_request_for_wallets(monkeypatch
 async def test_charge_payment_controller_returns_paid_or_pending_audit_contract(monkeypatch):
     payer_id, charge_id = uuid.uuid4(), uuid.uuid4()
     session = AsyncMock(spec=AsyncSession)
-    session.get.return_value = SimpleNamespace(id=payer_id, is_active=True, role=UserRole.USER)
+    session.get.return_value = SimpleNamespace(id=payer_id, is_active=True, role=UserRole.USER, amount=25000)
     monkeypatch.setattr(charges, "current_user_id", AsyncMock(return_value=payer_id))
-    paid = AsyncMock(return_value=SimpleNamespace(reference_id="TRF-PAID",
+    paid = AsyncMock(return_value=SimpleNamespace(reference_id="TRF-PAID", gmf_tax=100,
                                                   created_at=datetime.now(timezone.utc)))
     monkeypatch.setattr(charges, "process_charge_payment", paid)
     response = await charges.pay_charge(request(f"/api/v1/charges/{charge_id}/pay"), charge_id, session)

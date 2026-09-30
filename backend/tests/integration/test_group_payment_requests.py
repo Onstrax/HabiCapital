@@ -98,7 +98,7 @@ async def test_one_payer_completes_other_stays_pending_and_owner_sees_it(session
         session.add(funding)
         await session.flush()
         session.add(LedgerEntryModel(transaction_id=funding.id, debit_account_id=accounts["admin"],
-                                    credit_account_id=accounts["payer_a"], amount=50_000))
+                                    credit_account_id=accounts["payer_a"], amount=50_200))
     created = await async_client.post("/api/v1/charges/group", json=group_payload(),
                                       headers=headers(users["creator"], key=True))
     assert created.status_code == 201

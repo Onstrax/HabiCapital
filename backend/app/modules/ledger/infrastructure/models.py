@@ -26,6 +26,7 @@ class UserRole(str, enum.Enum):
 class AccountType(str, enum.Enum):
     USER_WALLET = "USER_WALLET"
     SYSTEM_OMNIBUS = "SYSTEM_OMNIBUS"
+    SYSTEM_TAX_GMF = "SYSTEM_TAX_GMF"
 
 
 class TransactionType(str, enum.Enum):
@@ -92,21 +93,29 @@ class UserModel(Base):
 
 class AccountModel(Base):
     __tablename__ = "accounts"
+    __table_args__ = (
+        CheckConstraint("(type = 'SYSTEM_TAX_GMF' AND user_id IS NULL) OR "
+                        "(type <> 'SYSTEM_TAX_GMF' AND user_id IS NOT NULL)", name="chk_account_owner"),
+        Index("uq_system_tax_gmf", "type", unique=True,
+              postgresql_where=text("type = 'SYSTEM_TAX_GMF'")),
+    )
 
     id: Mapped[uuid.UUID] = primary_uuid()
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"),
-                                               unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"),
+                                               unique=True, nullable=True)
     account_number: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
     type: Mapped[AccountType] = mapped_column(pg_enum(AccountType, "account_type"), nullable=False,
                                              default=AccountType.USER_WALLET, server_default=text("'USER_WALLET'"))
     created_at: Mapped[datetime] = created_timestamp()
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False,
                                                   server_default=func.now(), onupdate=func.now())
-    user: Mapped[UserModel] = relationship(back_populates="account")
+    user: Mapped[UserModel | None] = relationship(back_populates="account")
 
 
 class TransactionModel(Base):
     __tablename__ = "transactions"
+    __table_args__ = (CheckConstraint("gmf_tax >= 0", name="chk_transaction_gmf"),)
+    gmf_tax: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
 
     id: Mapped[uuid.UUID] = primary_uuid()
     reference_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)

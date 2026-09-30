@@ -7,12 +7,12 @@ import uuid
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select, text as sql_text
+from sqlalchemy import insert, func, select, text as sql_text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core import idempotency
-from app.core.config import get_settings
+from app.core.config import get_settings, DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID
 from app.core.database import get_db
 from app.core.security import create_access_token
 from app.main import app
@@ -37,6 +37,9 @@ async def ledger_db(monkeypatch):
     try:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.execute(insert(AccountModel).values(
+                id=DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID, user_id=None,
+                account_number="SYSTEM-TAX-GMF", type="SYSTEM_TAX_GMF"))
         sessions = async_sessionmaker(engine, expire_on_commit=False)
 
         async def override_get_db():
@@ -48,6 +51,7 @@ async def ledger_db(monkeypatch):
         monkeypatch.setenv("DATABASE_URL", url)
         monkeypatch.setenv("JWT_SECRET_KEY", "t" * 64)
         monkeypatch.setenv("ADMIN_PASSWORD", "test-password-123")
+        monkeypatch.setenv("SYSTEM_TAX_GMF_ACCOUNT_ID", str(DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID))
         get_settings.cache_clear()
         yield sessions
     finally:
@@ -114,11 +118,11 @@ async def test_successful_transfer_changes_derived_balances_once(ledger_db):
     assert first.status_code == replay.status_code == 201
     assert first.json() == replay.json()
     assert replay.headers["X-Cache"] == "HIT-IDEMPOTENCY"
-    assert balance.status_code == 200 and balance.json()["balance"] == 30000
+    assert balance.status_code == 200 and balance.json()["balance"] == 29920
     async with ledger_db() as session:
-        assert await calculate_account_balance(a.id, session) == 30000
+        assert await calculate_account_balance(a.id, session) == 29920
         assert await calculate_account_balance(b.id, session) == 20000
-        assert (await session.scalar(select(func.count()).select_from(LedgerEntryModel))) == 2
+        assert (await session.scalar(select(func.count()).select_from(LedgerEntryModel))) == 3
 
 
 @pytest.mark.asyncio
@@ -139,7 +143,7 @@ async def test_insufficient_funds_creates_no_transaction_or_entry(ledger_db):
 
 @pytest.mark.asyncio
 async def test_parallel_transfers_cannot_overdraw_sender(ledger_db):
-    sender, recipient, a, b = await seed_accounts(ledger_db)
+    sender, recipient, a, b = await seed_accounts(ledger_db, amount=50200)
     payload = {"recipient_id": str(recipient.id), "amount": 50000, "concept": "Race"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         responses = await asyncio.gather(*(

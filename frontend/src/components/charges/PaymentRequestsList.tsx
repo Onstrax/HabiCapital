@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDownLeft, Check, X } from "lucide-react";
 import { useState } from "react";
 import { api, ApiError } from "@/lib/api-client";
+import { FinancialBreakdown } from "@/components/FinancialBreakdown";
 import { formatCOP, formatDate, type Charge } from "@/lib/contracts";
 
 export function PaymentRequestsList() {
@@ -38,6 +39,7 @@ export function PaymentRequestsList() {
       <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="font-semibold">@{charge.requester_alias}</p><p className="mt-1 break-words text-sm text-[#718276]">{charge.concept}</p>
         <p className="mt-2 text-xs text-[#8a988d]">{formatDate(charge.created_at)}</p></div>
         <p className="shrink-0 font-bold text-forest">{formatCOP(charge.amount)}</p></div>
+      <div className="mt-3"><FinancialBreakdown amount={charge.amount} /></div>
       <div className="mt-4 grid grid-cols-2 gap-2"><button disabled={action.isPending} onClick={() => { setMessage(""); action.mutate({ id: charge.id, action: "reject" }); }} className="btn-subtle !min-h-10 !px-2 !py-2 text-sm"><X size={16} />Rechazar</button>
         <button disabled={action.isPending} onClick={() => { setMessage(""); action.mutate({ id: charge.id, action: "pay" }); }} className="btn-primary !min-h-10 !px-2 !py-2 text-sm"><Check size={16} />Pagar</button></div>
     </article>)}</div>

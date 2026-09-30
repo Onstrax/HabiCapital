@@ -8,6 +8,8 @@ import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { api, ApiError } from "@/lib/api-client";
 import { formatCOP, type Recipient } from "@/lib/contracts";
+import { FinancialBreakdown } from "@/components/FinancialBreakdown";
+import { tryGmfBreakdown } from "@/lib/gmf-math";
 import { clearTransferKey, stableTransferKey } from "@/lib/financial-retry";
 
 const lookupSchema = z.object({ recipient_alias: z.string().regex(/^[a-z0-9_]{3,20}$/, "Ingresa el alias exacto (3 a 20 caracteres)") });
@@ -27,6 +29,8 @@ export function TransferModal({ onClose }: { onClose: () => void }) {
   const [uncertain, setUncertain] = useState(false);
   const lookupForm = useForm<LookupValues>({ resolver: zodResolver(lookupSchema) });
   const transferForm = useForm<TransferValues>({ resolver: zodResolver(transferSchema) });
+  const watchedAmount = transferForm.watch("amount");
+  const quote = tryGmfBreakdown(watchedAmount);
   const lookup = useMutation({ mutationFn: (values: LookupValues) => api.post<Recipient>("/transfers/lookup", values),
     onSuccess: (value) => { setRecipient(value); setError(""); },
     onError: (cause) => setError(cause instanceof ApiError && cause.code === "RECIPIENT_NOT_FOUND"
@@ -51,7 +55,7 @@ export function TransferModal({ onClose }: { onClose: () => void }) {
       setUncertain(ambiguous);
       if (!ambiguous) clearTransferKey();
       setError(ambiguous ? "No pudimos confirmar el resultado. Revisa tus movimientos antes de volver a intentar. Si reintentas este mismo pago, conservaremos su llave de seguridad."
-        : cause instanceof ApiError && cause.code === "INSUFFICIENT_FUNDS" ? "Saldo insuficiente para esta transferencia."
+        : cause instanceof ApiError && cause.code === "INSUFFICIENT_FUNDS" ? cause.message
         : cause instanceof ApiError ? cause.message : "No pudimos completar la transferencia.");
     },
   });
@@ -62,7 +66,7 @@ export function TransferModal({ onClose }: { onClose: () => void }) {
   }, [onClose, transfer.isPending]);
 
   return <div className="fixed inset-0 z-50 flex items-end justify-center bg-[#082a25]/60 p-0 sm:items-center sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget && !transfer.isPending) onClose(); }}>
-    <section role="dialog" aria-modal="true" aria-labelledby="transfer-title" className="w-full max-w-lg rounded-t-[28px] bg-white p-6 shadow-2xl sm:rounded-[28px] sm:p-8">
+    <section role="dialog" aria-modal="true" aria-labelledby="transfer-title" className="max-h-[100dvh] overflow-y-auto sm:max-h-[90dvh] w-full max-w-lg rounded-t-[28px] bg-white p-6 shadow-2xl sm:rounded-[28px] sm:p-8">
       <div className="mb-7 flex items-center justify-between"><div><p className="text-xs font-semibold uppercase tracking-widest text-[#5b997a]">Transferencia segura</p>
         <h2 id="transfer-title" className="mt-1 text-2xl font-semibold">{reference ? "¡Listo!" : "Enviar dinero"}</h2></div>
         <button type="button" onClick={onClose} aria-label="Cerrar" className="rounded-full p-2 hover:bg-cream"><X size={21} /></button></div>
@@ -85,9 +89,11 @@ export function TransferModal({ onClose }: { onClose: () => void }) {
           <input id="concept" disabled={uncertain} className="field" placeholder="¿Para qué es?" {...transferForm.register("concept")} aria-invalid={!!transferForm.formState.errors.concept} />
           {transferForm.formState.errors.concept && <p role="alert" className="mt-1 text-sm text-red-700">{transferForm.formState.errors.concept.message}</p>}</div>
         <p className="text-sm text-[#667c6f]">Enviarás {Number.isSafeInteger(transferForm.watch("amount")) && transferForm.watch("amount") > 0 ? formatCOP(transferForm.watch("amount")) : "—"} a @{recipient.recipient_alias}.</p>
+        <FinancialBreakdown amount={watchedAmount} />
+        {Number.isSafeInteger(watchedAmount) && watchedAmount > 0 && !quote && <p role="alert">El monto más GMF supera el límite seguro.</p>}
         {error && <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-800">{error}</p>}
         <div className="flex flex-col-reverse gap-3 sm:flex-row"><button type="button" disabled={transfer.isPending || uncertain} className="btn-subtle sm:flex-1" onClick={() => { setRecipient(null); setError(""); }}><ArrowLeft size={18} />Atrás</button>
-          <button type="submit" disabled={transfer.isPending} className="btn-primary sm:flex-[2]">{transfer.isPending ? "Enviando..." : uncertain ? "Reintentar el mismo pago" : "Confirmar transferencia"}</button></div>
+          <button type="submit" disabled={transfer.isPending || !quote || watchedAmount <= 0} className="btn-primary sm:flex-[2]">{transfer.isPending ? "Enviando..." : uncertain ? "Reintentar el mismo pago" : "Confirmar transferencia"}</button></div>
       </form>}
     </section>
   </div>;

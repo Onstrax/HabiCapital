@@ -58,7 +58,8 @@ def test_register_login_and_exact_lookup_contracts():
                                     headers={"Authorization": f"Bearer {token}"})
             assert looked_up.status_code == 200
             assert looked_up.json() == {"recipient_id": str(user_id), "recipient_alias": "juan_1",
-                                        "masked_name": "J*** E****** G****"}
+                                        "masked_name": "J*** E****** G****", "alias": "juan_1",
+                                        "amount": None, "gmf_tax": None, "total_debit": None}
             repo.find_by_alias.assert_awaited_with("juan_1")
     finally:
         app.dependency_overrides.clear()

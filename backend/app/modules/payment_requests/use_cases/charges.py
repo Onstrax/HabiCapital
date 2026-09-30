@@ -23,6 +23,7 @@ from app.shared.exceptions import (
 class InsufficientChargePayment:
     current_balance: int
     required_amount: int
+    gmf_tax: int = 0
 
 
 async def create_charge_request(session: AsyncSession, requester_account_id: uuid.UUID,
@@ -73,9 +74,9 @@ async def process_charge_payment(session: AsyncSession, charge_id: uuid.UUID,
                                   action="PAYMENT_REQUEST_INSUFFICIENT_FUNDS",
                                   payload={"charge_id": str(charge.id),
                                            "current_balance": error.current_balance,
-                                           "required_amount": error.required_amount}))
+                                           "required_amount": error.required_amount, "gmf_tax": error.gmf_tax}))
         await session.flush()
-        return InsufficientChargePayment(error.current_balance, error.required_amount)
+        return InsufficientChargePayment(error.current_balance, error.required_amount, error.gmf_tax)
     charge.status = PaymentRequestStatus.COMPLETED
     await session.flush()
     return tx

@@ -126,7 +126,7 @@ cobro en `PENDING` y guarda la auditoría del intento, sin crear asientos.
 
 ## Auditoría contable y cobertura
 
-La suite incluye diez transferencias simultáneas desde una cuenta con 50.000 COP
+La suite incluye diez transferencias simultáneas desde una cuenta con 50.200 COP (50.000 de principal y 200 de GMF)
 y comprueba que exactamente una resulte exitosa, así como una auditoría global
 de débitos, créditos y saldos. Cada prueba usa un esquema PostgreSQL temporal y
 sesiones independientes por solicitud concurrente.
@@ -141,3 +141,25 @@ La configuración exige cobertura **superior al 90 %** cuando se ejecuta con
 `--cov`. Si se usa pytest en el host, define `TEST_DATABASE_URL` apuntando a la
 base `habicapital_p2p_test`; sin PostgreSQL se omiten las pruebas de integración
 y la puerta de cobertura falla.
+
+
+## Retención GMF 4x1000
+
+Transferencias y pagos de cobros debitan principal más max(1, principal * 4 // 1000),
+exclusivamente con enteros COP. Dos asientos balanceados acreditan el principal
+al destinatario y el impuesto al colector SYSTEM_TAX_GMF. Recargas administrativas,
+cancelaciones y rechazos están exentos.
+
+La migración a41f0c9b2d63 conserva el historial y crea el colector sin usuario ni
+credenciales. Las transacciones anteriores mantienen GMF cero. El UUID por defecto
+es 00000000-0000-4000-8000-000000000004; SYSTEM_TAX_GMF_ACCOUNT_ID permite elegirlo
+antes de inicializar el sistema. No cambiarlo después de registrar impuestos.
+
+Las tres cuentas se bloquean en orden de UUID y ambos asientos se registran en
+una única transacción. El colector compartido serializa parte de las operaciones
+concurrentes, un compromiso explícito de simplicidad e integridad para este alcance.
+La API devuelve gmf_tax y total_debit; lookup acepta amount opcional para cotizar.
+El GMF de cada cobro se registra únicamente al pagar. Cada destinatario de un split
+paga el impuesto de su propia parte, incluido el mínimo de un peso. La interfaz
+muestra el desglose antes de confirmar. Esta regla del reto no implementa exenciones
+ni procedimientos de declaración tributaria de un sistema real.

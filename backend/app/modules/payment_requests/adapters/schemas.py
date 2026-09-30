@@ -3,7 +3,8 @@
 import uuid
 from datetime import datetime
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, computed_field
+from app.modules.ledger.domain.gmf_calculator import calculate_gmf_tax
 
 from app.modules.identity.adapters.controllers import StrictSchema
 from app.modules.payment_requests.domain.split_calculator import percentage_points
@@ -55,6 +56,17 @@ class CreatedPaymentRequestResponseSchema(StrictSchema):
     status: str
     created_at: datetime
     updated_at: datetime
+
+
+    @computed_field
+    @property
+    def gmf_tax(self) -> int:
+        return calculate_gmf_tax(self.amount)
+
+    @computed_field
+    @property
+    def total_debit(self) -> int:
+        return self.amount + self.gmf_tax
 
 
 class GroupPaymentRequestResponseSchema(StrictSchema):

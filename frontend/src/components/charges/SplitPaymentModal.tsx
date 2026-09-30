@@ -5,6 +5,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, LockKeyhole, Plus, Trash2, UnlockKeyhole, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api-client";
 import { formatCOP, type CreatedCharge, type Recipient } from "@/lib/contracts";
+import { FinancialBreakdown } from "@/components/FinancialBreakdown";
+import { tryGmfBreakdown } from "@/lib/gmf-math";
 import { parsePercent } from "@/lib/split-math";
 import { clearGroupChargeKey, stableGroupChargeKey } from "@/lib/financial-retry";
 import { useSplitCalculator } from "./useSplitCalculator";
@@ -26,6 +28,7 @@ export function SplitPaymentModal({ onClose }: { onClose: () => void }) {
   const total = Number(totalText);
   const split = useSplitCalculator(total);
   const validAmount = Number.isSafeInteger(total) && total > 0;
+  const validTaxTotals = split.amounts?.every((amount) => tryGmfBreakdown(amount) !== null) ?? false;
   const validConcept = concept.trim().length > 0 && concept.trim().length <= 255;
   const badDraft = Object.values(drafts).some((value) => parsePercent(value) === null);
 
@@ -92,7 +95,7 @@ export function SplitPaymentModal({ onClose }: { onClose: () => void }) {
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    if (!validAmount || !validConcept || !split.valid || badDraft || mutation.isPending) return;
+    if (!validAmount || !validConcept || !split.valid || !validTaxTotals || badDraft || mutation.isPending) return;
     setError("");
     mutation.mutate();
   }
@@ -127,6 +130,7 @@ export function SplitPaymentModal({ onClose }: { onClose: () => void }) {
             {match?.recipient_alias === alias && <p className="mt-1 text-sm text-forest">Identidad confirmada: {match.masked_name}</p>}
             {lookupError && <p role="alert" className="mt-1 text-sm text-red-700">{lookupError}</p>}
           </div>
+          <p className="rounded-xl bg-mint p-3 text-sm">Cada pagador cubre su parte más GMF al pagar. Crear este grupo no debita tu cuenta; recibirás el monto solicitado.</p>
           <div><h3 className="text-sm font-semibold">Personas en el grupo</h3>
             <div className="mt-2 max-h-64 space-y-2 overflow-y-auto overscroll-contain">
               {split.rows.length === 0 && <p className="rounded-xl bg-cream p-4 text-sm">Añade al menos una persona.</p>}
@@ -148,6 +152,7 @@ export function SplitPaymentModal({ onClose }: { onClose: () => void }) {
                   {row.locked ? <LockKeyhole size={17} /> : <UnlockKeyhole size={17} />}</button>
                   <button type="button" aria-label={`Quitar @${row.alias}`} disabled={uncertain}
                     className="rounded-lg p-2 hover:bg-cream" onClick={() => { setDrafts({}); split.remove(row.recipient_id); }}><Trash2 size={17} /></button></div>
+                {split.amounts && <div className="col-span-full"><FinancialBreakdown amount={split.amounts[index]} payer={"@" + row.alias} /></div>}
               </div>)}
             </div>
             <p className={`mt-3 text-sm font-semibold ${split.points === 10_000 ? "text-forest" : "text-red-700"}`}>
@@ -155,7 +160,7 @@ export function SplitPaymentModal({ onClose }: { onClose: () => void }) {
             {split.rows.length > 0 && !split.valid && <p role="status" className="mt-1 text-xs text-red-700">Revisa los candados, porcentajes y montos: cada persona debe recibir al menos $1 COP.</p>}
           </div>
           {error && <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-800">{error}</p>}
-          <button type="submit" className="btn-primary w-full" disabled={busy || !validAmount || !validConcept || !split.valid || badDraft}>
+          <button type="submit" className="btn-primary w-full" disabled={busy || !validAmount || !validConcept || !split.valid || !validTaxTotals || badDraft}>
             {busy ? "Enviando..." : uncertain ? "Reintentar el mismo cobro" : "Enviar cobros grupales"}</button>
         </form>}
     </section>

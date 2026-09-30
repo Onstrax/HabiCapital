@@ -87,8 +87,8 @@ export default function Dashboard() {
           <ul className="max-h-[26rem] divide-y divide-[#e9eee7] overflow-y-auto overscroll-contain pr-2" tabIndex={movements.data?.items.length ? 0 : -1} aria-label="Historial de movimientos recientes">{movements.data?.items.map((item) => <li key={item.reference_id} className="flex items-center gap-3 py-4 first:pt-0">
             <div className={`flex size-11 shrink-0 items-center justify-center rounded-2xl ${item.direction === "IN" ? "bg-mint text-forest" : "bg-[#f7ede2] text-[#a77845]"}`}>
               {item.direction === "IN" ? <ArrowDownLeft size={20} /> : <ArrowUpRight size={20} />}</div>
-            <div className="min-w-0 flex-1"><p className="truncate font-semibold">{item.concept}</p><p className="mt-0.5 truncate text-xs text-[#748579]">{item.direction === "IN" ? "De" : "A"} @{item.counterparty_alias} · {formatDate(item.created_at)}</p></div>
-            <p className={`shrink-0 font-semibold ${item.direction === "IN" ? "text-[#29845e]" : "text-ink"}`}>{item.direction === "IN" ? "+" : "−"}{formatCOP(item.amount)}</p></li>)}</ul>
+            <div className="min-w-0 flex-1"><p className="truncate font-semibold">{item.concept}</p>{item.gmf_tax > 0 && <p className="text-xs text-[#748579]">Monto {formatCOP(item.amount)} + GMF {formatCOP(item.gmf_tax)}</p>}<p className="mt-0.5 truncate text-xs text-[#748579]">{item.direction === "IN" ? "De" : "A"} @{item.counterparty_alias} · {formatDate(item.created_at)}</p></div>
+            <p className={`shrink-0 font-semibold ${item.direction === "IN" ? "text-[#29845e]" : "text-ink"}`}>{item.direction === "IN" ? "+" : "−"}{formatCOP(item.direction === "OUT" ? item.total_debit : item.amount)}</p></li>)}</ul>
         </section>
         <PaymentRequestsList />
       </div>

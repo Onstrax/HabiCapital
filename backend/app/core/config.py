@@ -1,6 +1,12 @@
 """Validated deployment configuration. No settings are loaded at import time."""
 
 from functools import lru_cache
+from decimal import Decimal
+from uuid import UUID
+
+# Display/documentation only; monetary arithmetic uses integer 4/1000.
+GMF_TAX_RATE = Decimal("0.004")
+DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID = UUID("00000000-0000-4000-8000-000000000004")
 
 from pydantic import Field, PostgresDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +25,7 @@ class Settings(BaseSettings):
     ADMIN_EMAIL: str = "admin@habicapital.co"
     ADMIN_PASSWORD: str = Field(min_length=12)
     ADMIN_ALIAS: str = "admin_system"
+    SYSTEM_TAX_GMF_ACCOUNT_ID: UUID = DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

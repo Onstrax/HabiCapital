@@ -7,15 +7,15 @@ import uuid
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import text, insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core import idempotency
-from app.core.config import get_settings
+from app.core.config import get_settings, DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID
 from app.core.database import get_db
 from app.main import app
-from app.modules.ledger.infrastructure.models import Base
+from app.modules.ledger.infrastructure.models import Base, AccountModel
 
 os.environ.setdefault("PII_ENCRYPTION_KEY", base64.b64encode(b"E" * 32).decode())
 os.environ.setdefault("PII_BLIND_INDEX_KEY", base64.b64encode(b"B" * 32).decode())
@@ -34,9 +34,13 @@ async def test_engine(monkeypatch):
     try:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.execute(insert(AccountModel).values(
+                id=DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID, user_id=None,
+                account_number="SYSTEM-TAX-GMF", type="SYSTEM_TAX_GMF"))
         monkeypatch.setenv("DATABASE_URL", url)
         monkeypatch.setenv("JWT_SECRET_KEY", "t" * 64)
         monkeypatch.setenv("ADMIN_PASSWORD", "test-password-123")
+        monkeypatch.setenv("SYSTEM_TAX_GMF_ACCOUNT_ID", str(DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID))
         get_settings.cache_clear()
         yield engine
     finally:

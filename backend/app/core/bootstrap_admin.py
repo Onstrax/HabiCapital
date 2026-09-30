@@ -9,6 +9,7 @@ from app.core.config import get_settings
 from app.core.field_encryption import blind_index
 from app.core.database import get_session_factory
 from app.core.security import hash_password
+from app.modules.ledger.infrastructure.gmf_account import ensure_gmf_account
 from app.modules.ledger.infrastructure.models import (
     AccountModel, AccountType, UserModel, UserRole,
 )
@@ -21,6 +22,7 @@ async def bootstrap_admin() -> None:
     async with get_session_factory()() as session, session.begin():
         # Serialize repeated invocations so there is exactly one omnibus account.
         await session.execute(text("SELECT pg_advisory_xact_lock(214897301)"))
+        await ensure_gmf_account(session)
         existing_omnibus = (await session.execute(select(AccountModel).where(
             AccountModel.type == AccountType.SYSTEM_OMNIBUS))).scalars().all()
         admin = (await session.execute(select(UserModel).where(

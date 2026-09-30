@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import Field
+from pydantic import Field, computed_field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.core.database import get_db
+from app.modules.ledger.domain.gmf_calculator import calculate_gmf_tax
 from app.core.field_encryption import blind_index
 from app.core.openapi_security import bearer_auth, financial_key_header
 from app.modules.identity.adapters.controllers import (
@@ -32,7 +33,7 @@ from app.modules.payment_requests.use_cases.create_group_charge import (
 )
 from app.shared.exceptions import (
     BalanceLimitExceededException, ChargeForbiddenException,
-    ChargeNotFoundException, ChargeStateConflictException,
+    ChargeNotFoundException, ChargeStateConflictException, TaxAccountConfigurationException,
 )
 from app.shared.utils.security_utils import mask_full_name, sanitize_alias
 
@@ -55,11 +56,25 @@ class ChargeResponse(StrictSchema):
     created_at: datetime
 
 
+    @computed_field
+    @property
+    def gmf_tax(self) -> int:
+        return calculate_gmf_tax(self.amount)
+
+    @computed_field
+    @property
+    def total_debit(self) -> int:
+        return self.amount + self.gmf_tax
+
+
 class ChargesResponse(StrictSchema):
     items: list[ChargeResponse]
 
 
 class PaidResponse(StrictSchema):
+    amount: int
+    gmf_tax: int
+    total_debit: int
     charge_id: uuid.UUID
     status: str
     transaction_reference: str
@@ -241,16 +256,22 @@ async def pay_charge(request: Request, charge_id: uuid.UUID,
             if isinstance(outcome, InsufficientChargePayment):
                 response = JSONResponse(status_code=400, content={
                     "code": "INSUFFICIENT_FUNDS_FOR_PAYMENT_REQUEST",
-                    "message": "Saldo insuficiente para completar este pago. El cobro se mantendrá en estado PENDING.",
+                    "message": f"Requieres {outcome.required_amount:,} COP incluyendo GMF de {outcome.gmf_tax:,} COP. Tu cobro se mantendrá pendiente.",
                     "details": {"current_balance": outcome.current_balance,
-                                "required_amount": outcome.required_amount,
+                                "required_amount": outcome.required_amount, "gmf_tax": outcome.gmf_tax,
+                                "shortfall": max(0, outcome.required_amount - outcome.current_balance),
                                 "charge_status": "PENDING"},
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
             else:
+                paid_charge = await session.get(PaymentRequestModel, charge_id)
                 response = PaidResponse(charge_id=charge_id, status="COMPLETED",
+                                        amount=paid_charge.amount, gmf_tax=outcome.gmf_tax,
+                                        total_debit=paid_charge.amount + outcome.gmf_tax,
                                         transaction_reference=outcome.reference_id,
                                         paid_at=outcome.created_at)
+    except TaxAccountConfigurationException:
+        return api_error(503, "GMF_NOT_CONFIGURED", "Cuenta colectora GMF no configurada")
     except (ChargeNotFoundException, ChargeForbiddenException,
             ChargeStateConflictException, BalanceLimitExceededException) as exc:
         return charge_error(exc)

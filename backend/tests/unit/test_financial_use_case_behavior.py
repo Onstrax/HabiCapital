@@ -21,6 +21,16 @@ from app.shared.exceptions import (
 )
 
 pytestmark = pytest.mark.asyncio
+from app.core.config import DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID
+
+def tax_account():
+    return SimpleNamespace(id=DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID, user_id=None, type=AccountType.SYSTEM_TAX_GMF)
+
+@pytest.fixture(autouse=True)
+def tax_config(monkeypatch):
+    monkeypatch.setattr(transfer_money, "get_settings", lambda: SimpleNamespace(
+        SYSTEM_TAX_GMF_ACCOUNT_ID=DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID))
+
 
 
 def query_result(rows=None, row=None):
@@ -30,15 +40,15 @@ def query_result(rows=None, row=None):
     return result
 
 
-async def test_transfer_locks_accounts_in_uuid_order_and_posts_one_balanced_entry(monkeypatch):
+async def test_transfer_locks_three_accounts_in_uuid_order_and_posts_two_balanced_entries(monkeypatch):
     sender_id, recipient_id = uuid.UUID(int=2), uuid.UUID(int=1)
     sender_user = uuid.uuid4()
     sender = SimpleNamespace(id=sender_id, user_id=sender_user, type=AccountType.USER_WALLET)
     recipient = SimpleNamespace(id=recipient_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET)
     session = AsyncMock(spec=AsyncSession)
-    session.execute.return_value = query_result(rows=[recipient, sender])
+    session.execute.return_value = query_result(rows=[recipient, sender, tax_account()])
     monkeypatch.setattr(transfer_money, "calculate_account_balance",
-                        AsyncMock(side_effect=[50000, 0]))
+                        AsyncMock(side_effect=[50200, 0, 0]))
 
     tx = await transfer_money.execute_p2p_transfer_transactional(
         session, sender_id, recipient_id, 50000, "Test transfer", "TRF-UNIT",
@@ -54,13 +64,16 @@ async def test_transfer_locks_accounts_in_uuid_order_and_posts_one_balanced_entr
     assert (ledger.debit_account_id, ledger.credit_account_id, ledger.amount) == (
         sender_id, recipient_id, 50000,
     )
+    fee = [item for item in entries if isinstance(item, LedgerEntryModel)][1]
+    assert (fee.debit_account_id, fee.credit_account_id, fee.amount) == (sender_id, DEFAULT_SYSTEM_TAX_GMF_ACCOUNT_ID, 200)
+    assert tx.gmf_tax == 200
     assert audit.user_id == sender_user
     assert session.flush.await_count == 2
 
 
 @pytest.mark.parametrize("balance,recipient_balance,expected", [
     (49999, 0, InsufficientFundsException),
-    (50000, 2**63 - 1, BalanceLimitExceededException),
+    (50200, 2**63 - 1, BalanceLimitExceededException),
 ])
 async def test_transfer_fails_before_inserting_any_financial_row(
     monkeypatch, balance, recipient_balance, expected,
@@ -69,7 +82,7 @@ async def test_transfer_fails_before_inserting_any_financial_row(
     accounts = [SimpleNamespace(id=sender_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET),
                 SimpleNamespace(id=recipient_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET)]
     session = AsyncMock(spec=AsyncSession)
-    session.execute.return_value = query_result(rows=accounts)
+    session.execute.return_value = query_result(rows=accounts + [tax_account()])
     monkeypatch.setattr(transfer_money, "calculate_account_balance",
                         AsyncMock(side_effect=[balance, recipient_balance]))
     with pytest.raises(expected):
@@ -95,7 +108,7 @@ async def test_transfer_refuses_to_use_admin_omnibus_as_sender(monkeypatch):
     accounts = [SimpleNamespace(id=sender_id, user_id=uuid.uuid4(), type=AccountType.SYSTEM_OMNIBUS),
                 SimpleNamespace(id=recipient_id, user_id=uuid.uuid4(), type=AccountType.USER_WALLET)]
     session = AsyncMock(spec=AsyncSession)
-    session.execute.return_value = query_result(rows=accounts)
+    session.execute.return_value = query_result(rows=accounts + [tax_account()])
     calculate = AsyncMock(return_value=100000)
     monkeypatch.setattr(transfer_money, "calculate_account_balance", calculate)
     with pytest.raises(AccountNotFoundException):
